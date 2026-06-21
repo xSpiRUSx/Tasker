@@ -1,0 +1,40 @@
+workflows:
+  - id: simple_question
+    name: Простой вопрос
+    description: Ответить на простой вопрос пользователя по выбранному проекту без внесения изменений.
+    project_ids: ["solvix_zn", "sq_erp_ext"]
+    intents: ["question"]
+    task_kinds: ["question"]
+    complexity: ["trivial", "simple", "medium", "complex", "epic"]
+    required_tools: ["codex"]
+    requires_spec: false
+    requires_tests: false
+    requires_review: false
+    requires_config_approval: false
+    requires_deploy_prep: false
+    approval_gates: []
+    steps:
+      - Понять вопрос пользователя.
+      - При необходимости посмотреть контекст выбранного проекта.
+      - Дать короткий ответ и явно указать, если данных недостаточно.
+
+  - id: simple_external_development
+    name: Простая разработка без доработки конфигурации
+    description: Простая разработка внешнего отчета или обработки, либо написание кода или запроса прямо в ответе без изменения конфигурации.
+    project_ids: ["solvix_zn", "sq_erp_ext"]
+    intents: ["code_change"]
+    task_kinds: ["external_report_or_processing", "inline_code_or_query"]
+    complexity: ["trivial", "simple", "medium"]
+    required_tools: ["codex"]
+    requires_spec: false
+    requires_tests: false
+    requires_review: true
+    requires_config_approval: false
+    requires_deploy_prep: false
+    approval_gates: ["plan", "diff", "commit"]
+    blocked_change_types: ["configuration_change", "dependency_change", "migration", "deployment_change", "security_change", "architecture_change"]
+    steps:
+      - Понять, нужен внешний отчет, внешняя обработка, фрагмент кода или запрос.
+      - Не изменять конфигурацию выбранного проекта.
+      - Подготовить решение в виде внешнего артефакта или текста ответа.
+      - Кратко описать, как использовать получившийся код, запрос, отчет или обработку.

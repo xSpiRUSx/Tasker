@@ -1,0 +1,31 @@
+orchestrator:
+  task_id_prefix: "ENG"
+  timezone: "Europe/Prague"
+
+storage:
+  sqlite_path: "./data/orchestrator.sqlite3"
+
+artifacts:
+  root_path: "./data/obsidian-tasks"
+  task_folder_template: "{task_id} - {project_id} {slug}"
+  write_frontmatter: true
+  keep_versions: true
+  use_relative_paths_in_db: true
+
+router:
+  provider: "mock"
+  projects_path: "./config/projects.yml"
+  workflows_path: "./config/workflows.yml"
+
+execution:
+  default_executor: "mock"
+  worktrees_root: "./data/worktrees"
+  branch_template: "ai/{task_id}-{slug}"
+
+validation:
+  run_tests_after_execution: true
+
+approvals:
+  require_plan_approval: true
+  require_diff_approval: true
+  require_commit_approval: true

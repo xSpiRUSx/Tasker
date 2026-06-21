@@ -1,0 +1,123 @@
+workflows:
+  - id: clarify
+    name: Clarify missing task info
+    description: Ask for missing information before planning or execution.
+    project_ids: ["*"]
+    intents: ["*"]
+    task_kinds: ["*"]
+    complexity: ["trivial", "simple", "medium", "complex", "epic"]
+    requires_spec: false
+    requires_tests: false
+    requires_review: false
+    approval_gates: ["clarification"]
+    steps:
+      - Ask a focused clarifying question.
+
+  - id: question_only
+    name: Question only
+    description: Answer a question without modifying files.
+    project_ids: ["*"]
+    intents: ["question"]
+    task_kinds: ["question", "inline_code_or_query"]
+    complexity: ["trivial", "simple", "medium", "complex", "epic"]
+    required_tools: ["codex"]
+    requires_spec: false
+    requires_tests: false
+    requires_review: false
+    approval_gates: []
+    steps:
+      - Understand the user question.
+      - Inspect project context only if needed.
+      - Answer concisely and call out missing data.
+
+  - id: simple_external_development
+    name: Простая разработка без доработки конфигурации
+    description: Простая разработка внешнего отчета или обработки, либо написание кода или запроса без изменения конфигурации.
+    project_ids: ["*"]
+    intents: ["code_change"]
+    task_kinds: ["external_report_or_processing", "inline_code_or_query"]
+    complexity: ["trivial", "simple", "medium"]
+    required_tools: ["codex"]
+    requires_spec: false
+    requires_tests: false
+    requires_review: true
+    requires_config_approval: false
+    requires_deploy_prep: false
+    approval_gates: ["plan", "diff", "commit"]
+    blocked_change_types: ["configuration_change", "dependency_change", "migration", "deployment_change", "security_change", "architecture_change"]
+    steps:
+      - Понять, нужен внешний отчет, внешняя обработка, фрагмент кода или запрос.
+      - Не изменять конфигурацию выбранного проекта.
+      - Подготовить решение в виде внешнего артефакта или текста ответа.
+      - Кратко описать, как использовать получившийся код, запрос, отчет или обработку.
+
+  - id: simple_dev_no_config
+    name: Simple development without config changes
+    description: Scoped implementation that does not change configuration, dependencies, deployment, or architecture.
+    project_ids: ["*"]
+    intents: ["code_change"]
+    task_kinds: ["bugfix", "feature", "refactor", "test_update", "docs_update"]
+    complexity: ["simple", "medium"]
+    required_tools: ["codex"]
+    requires_spec: false
+    requires_tests: true
+    requires_review: true
+    approval_gates: ["plan", "diff", "commit"]
+    blocked_change_types:
+      - configuration_change
+      - dependency_change
+      - migration
+      - deployment_change
+      - security_change
+      - architecture_change
+    steps:
+      - Collect relevant context.
+      - Create a focused todo and test plan.
+      - Request plan approval.
+      - Implement the approved change.
+      - Validate and review the diff.
+
+  - id: simple_dev_with_config
+    name: Simple development with config changes
+    description: Scoped implementation that includes configuration or dependency changes.
+    project_ids: ["*"]
+    intents: ["code_change"]
+    task_kinds: ["configuration_change", "dependency_change"]
+    complexity: ["medium", "complex"]
+    required_tools: ["codex"]
+    requires_spec: true
+    requires_tests: true
+    requires_review: true
+    requires_config_approval: true
+    approval_gates: ["plan", "config_change", "diff", "commit"]
+    steps:
+      - Collect relevant context.
+      - Create a short specification and test plan.
+      - Request plan approval.
+      - Implement the approved change.
+      - Validate and review the diff.
+
+  - id: complex_change
+    name: Complex multi-phase change
+    description: Complex, risky, security-sensitive, deployment, migration, or architecture change.
+    project_ids: ["*"]
+    intents: ["code_change", "investigation"]
+    task_kinds:
+      - migration
+      - deployment_change
+      - security_change
+      - architecture_change
+      - investigation
+    complexity: ["complex", "epic"]
+    required_tools: ["codex"]
+    requires_spec: true
+    requires_tests: true
+    requires_review: true
+    requires_deploy_prep: true
+    approval_gates: ["spec", "plan", "diff", "commit", "deploy_prep"]
+    steps:
+      - Collect context.
+      - Create a specification.
+      - Split the work into phases.
+      - Request approval before execution.
+      - Validate, review, and prepare deployment notes if needed.

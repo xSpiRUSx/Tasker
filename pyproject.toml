@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "engineering-assistant"
+version = "0.1.0"
+description = "Modular monolith for task routing and engineering task orchestration."
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.111",
+  "httpx>=0.27",
+  "langchain-core>=0.3.0",
+  "langchain-openai>=0.2.0",
+  "langgraph>=0.2.60",
+  "pydantic>=2.8.0",
+  "python-dotenv>=1.0.1",
+  "pyyaml>=6.0.2",
+  "uvicorn>=0.30",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+]
+
+[project.scripts]
+engineering-assistant = "engineering_assistant.main:main"
+task-router = "task_router.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = [
+  "engineering_assistant*",
+  "engineering_orchestrator*",
+  "task_router*",
+]
+
+[tool.setuptools.package-data]
+engineering_orchestrator = ["templates/*.j2", "prompts/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = [
+  "tests",
+  "engineering_orchestrator/tests",
+  "langgraph-task-router/tests",
+]
+pythonpath = [
+  ".",
+  "src",
+]

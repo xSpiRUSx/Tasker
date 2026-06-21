@@ -1,0 +1,46 @@
+tools:
+  - id: codex
+    name: Codex
+    type: coding_agent
+    description: Uses Codex for implementation, investigation, and code review tasks.
+  - id: 1c-graph-metadata-mcp
+    name: 1C Graph Metadata MCP
+    type: mcp
+    description: Analyzes 1C metadata and BSL code through a graph index.
+
+projects:
+  - id: billing-api
+    name: Billing API
+    path: ./examples/billing-api
+    aliases:
+      - billing
+      - billing-api
+      - auth
+      - login
+    description: FastAPI billing backend sample project.
+    tools:
+      - codex
+
+  - id: generic
+    name: Generic Project
+    path: .
+    aliases:
+      - generic
+      - default
+    description: Default local project used when the request does not mention a configured project.
+    tools:
+      - codex
+
+  - id: solvix_zn
+    name: Solvix_ZN
+    path: C:\Configuration\Solvix_ZN
+    aliases: ["solvix", "solvix_zn", "zn", "зн", "сольвикс"]
+    description: Рабочий проект в каталоге C:\Configuration\Solvix_ZN.
+    tools: ["codex"]
+
+  - id: sq_erp_ext
+    name: Снежная королева ЕРП
+    path: C:\Configuration\SQ_ERP\ERP_Ext
+    aliases: ["sq_erp_ext", "sq erp", "erp_ext", "снежная королева", "снежная королева ерп", "ск ерп"]
+    description: Проект Снежная королева ЕРП в каталоге C:\Configuration\SQ_ERP\ERP_Ext.
+    tools: ["codex", "1c-graph-metadata-mcp"]

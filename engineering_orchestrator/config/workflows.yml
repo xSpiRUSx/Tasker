@@ -1,0 +1,100 @@
+workflows:
+  - id: clarify
+    name: Clarify missing task info
+    project_ids: ["*"]
+    intents: ["*"]
+    task_kinds: ["*"]
+    complexity: ["trivial", "simple", "medium", "complex", "epic"]
+    requires_spec: false
+    requires_tests: false
+    requires_review: false
+    approval_gates: ["clarification"]
+    steps:
+      - ask_clarifying_question
+
+  - id: question_only
+    name: Question only
+    project_ids: ["*"]
+    intents: ["question"]
+    task_kinds: ["question", "inline_code_or_query"]
+    complexity: ["trivial", "simple", "medium"]
+    requires_spec: false
+    requires_tests: false
+    requires_review: false
+    approval_gates: []
+    steps:
+      - collect_context
+      - answer
+      - close_task
+
+  - id: simple_dev_no_config
+    name: Simple development without config changes
+    project_ids: ["*"]
+    intents: ["code_change"]
+    task_kinds: ["bugfix", "feature", "refactor", "test_update"]
+    complexity: ["simple", "medium"]
+    requires_spec: false
+    requires_tests: true
+    requires_review: true
+    approval_gates: ["plan", "diff", "commit"]
+    blocked_change_types:
+      - configuration_change
+      - dependency_change
+      - migration
+      - deployment_change
+    steps:
+      - collect_context
+      - create_todo
+      - create_test_plan
+      - approve_plan
+      - implement
+      - validate
+      - review_diff
+      - commit
+
+  - id: simple_dev_with_config
+    name: Simple development with config changes
+    project_ids: ["*"]
+    intents: ["code_change"]
+    task_kinds: ["configuration_change", "dependency_change"]
+    complexity: ["medium", "complex"]
+    requires_spec: true
+    requires_tests: true
+    requires_review: true
+    requires_config_approval: true
+    approval_gates: ["plan", "config_change", "diff", "commit"]
+    steps:
+      - collect_context
+      - create_spec
+      - create_test_plan
+      - approve_plan
+      - implement
+      - validate
+      - review_diff
+      - commit
+
+  - id: complex_change
+    name: Complex multi-phase change
+    project_ids: ["*"]
+    intents: ["code_change", "investigation"]
+    task_kinds:
+      - migration
+      - deployment_change
+      - security_change
+      - architecture_change
+    complexity: ["complex", "epic"]
+    requires_spec: true
+    requires_tests: true
+    requires_review: true
+    requires_deploy_prep: true
+    approval_gates: ["spec", "plan", "diff", "commit", "deploy_prep"]
+    steps:
+      - collect_context
+      - create_spec
+      - split_into_subtasks
+      - approve_spec
+      - implement
+      - validate
+      - review_diff
+      - commit
+      - deploy_prep

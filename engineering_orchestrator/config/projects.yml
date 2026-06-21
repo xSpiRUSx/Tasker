@@ -1,0 +1,45 @@
+tools:
+  - id: codex
+    name: Codex
+    type: coding_agent
+    description: Uses Codex for implementation tasks.
+
+projects:
+  - id: billing-api
+    name: Billing API
+    path: ./examples/billing-api
+    aliases:
+      - billing
+      - billing-api
+      - auth
+      - login
+    description: FastAPI billing backend.
+    tools:
+      - codex
+    test_commands:
+      - pytest
+      - ruff check .
+      - mypy .
+    risky_areas:
+      - auth
+      - payments
+      - migrations
+      - security
+    deploy:
+      type: docker
+      requires_manual_approval: true
+
+  - id: generic
+    name: Generic Project
+    path: .
+    aliases:
+      - generic
+      - default
+    description: Default project used when a request does not mention a configured project.
+    tools:
+      - codex
+    test_commands:
+      - pytest
+    risky_areas:
+      - security
+      - migrations

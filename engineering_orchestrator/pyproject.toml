@@ -1,0 +1,30 @@
+[project]
+name = "engineering-orchestrator"
+version = "0.1.0"
+description = "MVP engineering task lifecycle orchestrator with SQLite state and Obsidian artifacts."
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.111",
+  "pydantic>=2",
+  "pyyaml>=6",
+  "uvicorn>=0.30",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8",
+  "httpx>=0.27",
+]
+
+[project.scripts]
+engineering-orchestrator = "engineering_orchestrator.main:main"
+
+[tool.setuptools.packages.find]
+include = ["engineering_orchestrator*"]
+
+[tool.setuptools.package-data]
+engineering_orchestrator = ["templates/*.j2", "prompts/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

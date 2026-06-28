@@ -7,7 +7,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from engineering_orchestrator.models import Approval, ApprovalStatus, Task, TaskArtifact, TaskEvent, TaskStatus
+from engineering_orchestrator.models import (
+    AgentRun,
+    AgentStep,
+    Approval,
+    ApprovalStatus,
+    EvaluationResult,
+    Task,
+    TaskArtifact,
+    TaskEvent,
+    TaskStatus,
+)
 
 
 def utc_now() -> datetime:
@@ -101,6 +111,48 @@ class TaskStore:
                   created_at TEXT NOT NULL,
                   FOREIGN KEY(task_id) REFERENCES tasks(id)
                 );
+
+                CREATE TABLE IF NOT EXISTS agent_runs (
+                  id TEXT PRIMARY KEY,
+                  task_id TEXT NOT NULL,
+                  run_type TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  executor TEXT,
+                  model TEXT,
+                  started_at TEXT NOT NULL,
+                  finished_at TEXT,
+                  iteration_count INTEGER NOT NULL DEFAULT 0,
+                  stop_reason TEXT,
+                  FOREIGN KEY(task_id) REFERENCES tasks(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS agent_steps (
+                  id TEXT PRIMARY KEY,
+                  run_id TEXT NOT NULL,
+                  step_index INTEGER NOT NULL,
+                  step_type TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  input_summary TEXT,
+                  output_summary TEXT,
+                  artifact_ids_json TEXT NOT NULL,
+                  started_at TEXT NOT NULL,
+                  finished_at TEXT,
+                  error TEXT,
+                  FOREIGN KEY(run_id) REFERENCES agent_runs(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS evaluation_results (
+                  id TEXT PRIMARY KEY,
+                  run_id TEXT NOT NULL,
+                  task_id TEXT NOT NULL,
+                  passed INTEGER NOT NULL,
+                  score REAL,
+                  status TEXT NOT NULL,
+                  findings_json TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  FOREIGN KEY(run_id) REFERENCES agent_runs(id),
+                  FOREIGN KEY(task_id) REFERENCES tasks(id)
+                );
                 """
             )
 
@@ -141,6 +193,31 @@ class TaskStore:
         if row is None:
             raise KeyError(f"Task not found: {task_id}")
         return self._row_to_task(row)
+
+    def list_tasks(
+        self,
+        status: TaskStatus | None = None,
+        project_id: str | None = None,
+        limit: int = 100,
+    ) -> list[Task]:
+        sql = "SELECT * FROM tasks"
+        params: list[Any] = []
+        clauses: list[str] = []
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY updated_at DESC, id DESC"
+        if limit > 0:
+            sql += " LIMIT ?"
+            params.append(limit)
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [self._row_to_task(row) for row in rows]
 
     def update_task(self, task: Task) -> None:
         task.updated_at = utc_now()
@@ -185,6 +262,23 @@ class TaskStore:
 
     def add_artifact(self, artifact: TaskArtifact) -> None:
         with self.connect() as conn:
+            if artifact.version is None:
+                existing = conn.execute(
+                    """
+                    SELECT * FROM artifacts
+                    WHERE task_id = ? AND kind = ? AND version IS NULL
+                    ORDER BY created_at, id
+                    """,
+                    (artifact.task_id, artifact.kind),
+                ).fetchall()
+                if existing:
+                    first = self._row_to_artifact(existing[0])
+                    artifact.id = first.id
+                    artifact.created_at = first.created_at
+                    duplicate_ids = [row["id"] for row in existing[1:]]
+                    if duplicate_ids:
+                        conn.executemany("DELETE FROM artifacts WHERE id = ?", [(artifact_id,) for artifact_id in duplicate_ids])
+
             conn.execute(
                 """
                 INSERT OR REPLACE INTO artifacts (
@@ -206,6 +300,11 @@ class TaskStore:
                     artifact.approved_at.isoformat() if artifact.approved_at else None,
                 ),
             )
+
+    def upsert_artifact_by_kind(self, task_id: str, artifact: TaskArtifact) -> None:
+        artifact.task_id = task_id
+        artifact.version = None
+        self.add_artifact(artifact)
 
     def update_artifact(self, artifact: TaskArtifact) -> None:
         artifact.updated_at = utc_now()
@@ -321,6 +420,227 @@ class TaskStore:
             ).fetchall()
         return [self._row_to_event(row) for row in rows]
 
+    def create_run(
+        self,
+        task_id: str,
+        run_type: str,
+        status: str = "running",
+        executor: str | None = None,
+        model: str | None = None,
+    ) -> AgentRun:
+        run = AgentRun(
+            id=new_id("run"),
+            task_id=task_id,
+            run_type=run_type,
+            status=status,
+            executor=executor,
+            model=model,
+            started_at=utc_now(),
+        )
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO agent_runs (
+                  id, task_id, run_type, status, executor, model, started_at,
+                  finished_at, iteration_count, stop_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run.id,
+                    run.task_id,
+                    run.run_type,
+                    run.status,
+                    run.executor,
+                    run.model,
+                    run.started_at.isoformat(),
+                    None,
+                    run.iteration_count,
+                    run.stop_reason,
+                ),
+            )
+        return run
+
+    def finish_run(
+        self,
+        run_id: str,
+        status: str,
+        iteration_count: int | None = None,
+        stop_reason: str | None = None,
+    ) -> AgentRun:
+        run = self.get_run(run_id)
+        run.status = status
+        run.finished_at = utc_now()
+        if iteration_count is not None:
+            run.iteration_count = iteration_count
+        run.stop_reason = stop_reason
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE agent_runs
+                SET status = ?, finished_at = ?, iteration_count = ?, stop_reason = ?
+                WHERE id = ?
+                """,
+                (run.status, run.finished_at.isoformat(), run.iteration_count, run.stop_reason, run.id),
+            )
+        return run
+
+    def get_run(self, run_id: str) -> AgentRun:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM agent_runs WHERE id = ?", (run_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"Run not found: {run_id}")
+        return self._row_to_run(row)
+
+    def list_runs(self, task_id: str) -> list[AgentRun]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM agent_runs WHERE task_id = ? ORDER BY started_at, id",
+                (task_id,),
+            ).fetchall()
+        return [self._row_to_run(row) for row in rows]
+
+    def add_step(
+        self,
+        run_id: str,
+        step_index: int,
+        step_type: str,
+        status: str,
+        input_summary: str | None = None,
+        output_summary: str | None = None,
+        artifact_ids: list[str] | None = None,
+        error: str | None = None,
+        finished: bool = True,
+    ) -> AgentStep:
+        now = utc_now()
+        step = AgentStep(
+            id=new_id("step"),
+            run_id=run_id,
+            step_index=step_index,
+            step_type=step_type,
+            status=status,
+            input_summary=input_summary,
+            output_summary=output_summary,
+            artifact_ids=artifact_ids or [],
+            started_at=now,
+            finished_at=now if finished else None,
+            error=error,
+        )
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO agent_steps (
+                  id, run_id, step_index, step_type, status, input_summary,
+                  output_summary, artifact_ids_json, started_at, finished_at, error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    step.id,
+                    step.run_id,
+                    step.step_index,
+                    step.step_type,
+                    step.status,
+                    step.input_summary,
+                    step.output_summary,
+                    _json(step.artifact_ids),
+                    step.started_at.isoformat(),
+                    step.finished_at.isoformat() if step.finished_at else None,
+                    step.error,
+                ),
+            )
+        return step
+
+    def finish_step(
+        self,
+        step_id: str,
+        status: str,
+        output_summary: str | None = None,
+        artifact_ids: list[str] | None = None,
+        error: str | None = None,
+    ) -> AgentStep:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM agent_steps WHERE id = ?", (step_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"Step not found: {step_id}")
+        step = self._row_to_step(row)
+        step.status = status
+        step.output_summary = output_summary
+        if artifact_ids is not None:
+            step.artifact_ids = artifact_ids
+        step.error = error
+        step.finished_at = utc_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE agent_steps
+                SET status = ?, output_summary = ?, artifact_ids_json = ?, finished_at = ?, error = ?
+                WHERE id = ?
+                """,
+                (
+                    step.status,
+                    step.output_summary,
+                    _json(step.artifact_ids),
+                    step.finished_at.isoformat(),
+                    step.error,
+                    step.id,
+                ),
+            )
+        return step
+
+    def list_steps(self, run_id: str) -> list[AgentStep]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM agent_steps WHERE run_id = ? ORDER BY step_index, id",
+                (run_id,),
+            ).fetchall()
+        return [self._row_to_step(row) for row in rows]
+
+    def add_evaluation(
+        self,
+        run_id: str,
+        task_id: str,
+        passed: bool,
+        status: str,
+        findings: list[dict[str, Any]] | None = None,
+        score: float | None = None,
+    ) -> EvaluationResult:
+        evaluation = EvaluationResult(
+            id=new_id("eval"),
+            run_id=run_id,
+            task_id=task_id,
+            passed=passed,
+            score=score,
+            status=status,
+            findings=findings or [],
+            created_at=utc_now(),
+        )
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO evaluation_results (
+                  id, run_id, task_id, passed, score, status, findings_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    evaluation.id,
+                    evaluation.run_id,
+                    evaluation.task_id,
+                    1 if evaluation.passed else 0,
+                    evaluation.score,
+                    evaluation.status,
+                    _json(evaluation.findings),
+                    evaluation.created_at.isoformat(),
+                ),
+            )
+        return evaluation
+
+    def list_evaluations(self, task_id: str) -> list[EvaluationResult]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM evaluation_results WHERE task_id = ? ORDER BY created_at, id",
+                (task_id,),
+            ).fetchall()
+        return [self._row_to_evaluation(row) for row in rows]
+
     def _task_values(self, task: Task) -> tuple[Any, ...]:
         return (
             task.id,
@@ -400,5 +720,46 @@ class TaskStore:
             task_id=row["task_id"],
             event_type=row["event_type"],
             payload=json.loads(row["payload_json"]),
+            created_at=_dt(row["created_at"]),
+        )
+
+    def _row_to_run(self, row: sqlite3.Row) -> AgentRun:
+        return AgentRun(
+            id=row["id"],
+            task_id=row["task_id"],
+            run_type=row["run_type"],
+            status=row["status"],
+            executor=row["executor"],
+            model=row["model"],
+            started_at=_dt(row["started_at"]),
+            finished_at=_dt(row["finished_at"]),
+            iteration_count=row["iteration_count"],
+            stop_reason=row["stop_reason"],
+        )
+
+    def _row_to_step(self, row: sqlite3.Row) -> AgentStep:
+        return AgentStep(
+            id=row["id"],
+            run_id=row["run_id"],
+            step_index=row["step_index"],
+            step_type=row["step_type"],
+            status=row["status"],
+            input_summary=row["input_summary"],
+            output_summary=row["output_summary"],
+            artifact_ids=json.loads(row["artifact_ids_json"]),
+            started_at=_dt(row["started_at"]),
+            finished_at=_dt(row["finished_at"]),
+            error=row["error"],
+        )
+
+    def _row_to_evaluation(self, row: sqlite3.Row) -> EvaluationResult:
+        return EvaluationResult(
+            id=row["id"],
+            run_id=row["run_id"],
+            task_id=row["task_id"],
+            passed=bool(row["passed"]),
+            score=row["score"],
+            status=row["status"],
+            findings=json.loads(row["findings_json"]),
             created_at=_dt(row["created_at"]),
         )

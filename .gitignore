@@ -22,11 +22,10 @@ env/
 !.env.example
 
 # Runtime data
+data/
 *.sqlite3
 *.db
-data/worktrees/
-data/obsidian-tasks/
-data/*.log
+*.log
 engineering_orchestrator/data/worktrees/
 engineering_orchestrator/data/obsidian-tasks/
 engineering_orchestrator/data/*.sqlite3

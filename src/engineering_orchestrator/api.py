@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Protocol
 
 from fastapi import FastAPI, HTTPException
 
+from engineering_orchestrator.harness import ContextBuilder, PromptBuilder
+from engineering_orchestrator.loop import Evaluator, LoopPolicy, Observer, RepairPlanner
 from engineering_orchestrator.models import (
     ApprovalDecisionRequest,
     ContinueTaskRequest,
@@ -14,7 +18,7 @@ from engineering_orchestrator.models import (
     Task,
 )
 from engineering_orchestrator.services.approval_service import ApprovalService
-from engineering_orchestrator.services.artifact_store import ArtifactStore, slugify
+from engineering_orchestrator.services.artifact_store import ArtifactStore, slugify, slugify_short
 from engineering_orchestrator.services.event_service import EventService
 from engineering_orchestrator.services.executor_service import ExecutorService
 from engineering_orchestrator.services.git_service import GitService
@@ -25,6 +29,7 @@ from engineering_orchestrator.services.task_store import TaskStore, utc_now
 from engineering_orchestrator.services.validation_service import ValidationService
 from engineering_orchestrator.services.workflow_registry import WorkflowRegistry
 from engineering_orchestrator.settings import Settings, load_settings
+from engineering_orchestrator.ui import register_ui_routes
 
 
 PRE_EXECUTION_GATE_ORDER = ["spec", "config_change", "migration", "security_change", "deploy_prep"]
@@ -63,6 +68,17 @@ class Orchestrator:
         self.validation_service = ValidationService()
         self.review_service = ReviewService()
         self.task_router = task_router
+        self.prompt_builder = PromptBuilder()
+        self.context_builder = ContextBuilder(
+            self.task_store,
+            self.projects,
+            self.workflows,
+            base_dir=Path(settings.projects_path).resolve().parent.parent,
+            stop_conditions=self._loop_policy().model_dump(),
+        )
+        self.observer = Observer(self.git_service)
+        self.evaluator = Evaluator(self._loop_policy())
+        self.repair_planner = RepairPlanner()
 
     def create_task(self, request: CreateTaskRequest) -> CreateTaskResponse:
         task = self.task_store.create_task(request.message, request.source, request.user_id, self.settings.task_id_prefix)
@@ -81,15 +97,53 @@ class Orchestrator:
             return self._create_response(task, None)
 
         self._collect_context(task)
+        if route.workflow_id == "question_only":
+            task = self._answer_question_and_close(task.id)
+            return self._create_response(task, None)
+
         approval = self._create_plan(task)
+        if approval is None:
+            task = self._advance_after_pre_execution_approval(task.id)
+            return self._create_response(task, self._pending_gate(task))
+
         task = self.task_store.get_task(task.id)
         return self._create_response(task, approval.gate)
 
     def get_task(self, task_id: str) -> Task:
         return self.task_store.get_task(task_id)
 
+    def list_tasks(self, status: str | None = None, project_id: str | None = None, limit: int = 100) -> list[Task]:
+        return self.task_store.list_tasks(status, project_id=project_id, limit=limit)  # type: ignore[arg-type]
+
     def list_artifacts(self, task_id: str):
         return self.task_store.list_artifacts(task_id)
+
+    def list_approvals(self, task_id: str):
+        self.task_store.get_task(task_id)
+        return self.task_store.list_approvals(task_id)
+
+    def list_events(self, task_id: str):
+        self.task_store.get_task(task_id)
+        return self.task_store.list_events(task_id)
+
+    def get_context(self, task_id: str):
+        task = self.task_store.get_task(task_id)
+        return self.context_builder.build(task)
+
+    def rebuild_context(self, task_id: str):
+        task = self.task_store.get_task(task_id)
+        return self._write_working_memory(task)
+
+    def list_runs(self, task_id: str):
+        self.task_store.get_task(task_id)
+        return self.task_store.list_runs(task_id)
+
+    def get_run(self, run_id: str):
+        return self.task_store.get_run(run_id)
+
+    def list_steps(self, run_id: str):
+        self.task_store.get_run(run_id)
+        return self.task_store.list_steps(run_id)
 
     def read_artifact(self, task_id: str, kind: str, version: int | None = None) -> str:
         artifact = self.task_store.get_artifact(task_id, kind, version)
@@ -127,9 +181,12 @@ class Orchestrator:
 
     def continue_task(self, task_id: str, request: ContinueTaskRequest) -> Task:
         task = self.task_store.get_task(task_id)
+        self._add_event(task, "user_message_added", {"message": request.message})
+        if task.status in {"plan_rejected", "changes_requested", "validation_failed"}:
+            return self._revise_plan(task_id, request.message)
+
         task.status = "changes_requested"
         self.task_store.update_task(task)
-        self._add_event(task, "user_message_added", {"message": request.message})
         self._write_index(task, "Changes were requested by the user.")
         return self.task_store.get_task(task_id)
 
@@ -258,44 +315,129 @@ class Orchestrator:
 """
         artifact = self.artifact_store.write_markdown(task, "context_summary", "Context summary", content)
         self.task_store.add_artifact(artifact)
+        self._write_working_memory(task)
         self._add_event(task, "context_collected", {"mode": "route_metadata_only"})
 
-    def _create_plan(self, task: Task):
+    def _write_working_memory(self, task: Task):
+        memory = self.context_builder.build(task)
+        markdown = self.prompt_builder.render_memory_markdown(memory)
+        markdown_artifact = self.artifact_store.write_markdown(
+            task,
+            "working_memory",
+            "Working memory",
+            markdown,
+        )
+        json_artifact = self.artifact_store.write_json(
+            task,
+            "working_memory_json",
+            "Working memory JSON",
+            memory.model_dump(mode="json"),
+        )
+        self.task_store.add_artifact(markdown_artifact)
+        self.task_store.add_artifact(json_artifact)
+        return memory
+
+    def _create_plan(self, task: Task, revision_comment: str | None = None):
         task.status = "planning"
         self.task_store.update_task(task)
         route = RouteDecision(**(task.route_decision or {}))
         context_artifact = self.task_store.get_artifact(task.id, "context_summary")
         context_markdown = self.artifact_store.read_text(context_artifact) if context_artifact else ""
+        if revision_comment:
+            context_markdown = context_markdown.rstrip() + f"\n\n## Latest correction request\n\n{revision_comment}\n"
         draft = self.planning_service.write_plan(task, route, context_markdown)
         artifacts = []
+        version = self._next_plan_version(task.id)
 
         if route.requires_spec and draft.spec_markdown.strip():
             artifacts.append(
-                self.artifact_store.write_markdown(task, "spec", "Specification v1", draft.spec_markdown, version=1)
+                self.artifact_store.write_markdown(task, "spec", f"Specification v{version}", draft.spec_markdown, version=version)
             )
-        artifacts.append(self.artifact_store.write_markdown(task, "todo", "Todo v1", draft.todo_markdown, version=1))
-        artifacts.append(self.artifact_store.write_markdown(task, "test_plan", "Test plan v1", draft.test_plan_markdown, version=1))
+        artifacts.append(self.artifact_store.write_markdown(task, "todo", f"Todo v{version}", draft.todo_markdown, version=version))
         artifacts.append(
-            self.artifact_store.write_markdown(task, "approval_request", "Plan approval request v1", draft.approval_markdown, version=1)
+            self.artifact_store.write_markdown(task, "test_plan", f"Test plan v{version}", draft.test_plan_markdown, version=version)
+        )
+        approval_markdown = draft.approval_markdown
+        if revision_comment:
+            approval_markdown = approval_markdown.rstrip() + f"\n\n## Correction request\n\n{revision_comment}\n"
+        artifacts.append(
+            self.artifact_store.write_markdown(
+                task,
+                "approval_request",
+                f"Plan approval request v{version}",
+                approval_markdown,
+                version=version,
+            )
         )
         for artifact in artifacts:
             self.task_store.add_artifact(artifact)
+
+        event_payload = {
+            "planner_provider": self.settings.planner_provider,
+            "planning_notes": draft.planning_notes,
+            "plan_version": version,
+        }
+        if not self.settings.require_plan_approval:
+            self._add_event(task, "plan_approval_skipped", event_payload)
+            self._write_index(self.task_store.get_task(task.id), "Plan approval is disabled by policy.")
+            return None
 
         approval = self.task_store.create_approval(
             task.id,
             "plan",
             [artifact.id for artifact in artifacts],
-            {"approves": ["worktree creation when needed", "configured executor run", "validation", "review report"]},
+            {
+                "approves": ["worktree creation when needed", "configured executor run", "validation", "review report"],
+                "plan_version": version,
+                "revision_comment": revision_comment,
+            },
         )
         task.status = "awaiting_plan_approval"
         self.task_store.update_task(task)
-        self._add_event(
-            task,
-            "plan_approval_requested",
-            {"approval_id": approval.id, "planner_provider": self.settings.planner_provider, "planning_notes": draft.planning_notes},
-        )
+        self._add_event(task, "plan_approval_requested", {"approval_id": approval.id, **event_payload})
         self._write_index(self.task_store.get_task(task.id), "Pending approval gate: `plan`.")
         return approval
+
+    def _revise_plan(self, task_id: str, correction: str) -> Task:
+        task = self.task_store.get_task(task_id)
+        approval = self._create_plan(task, revision_comment=correction)
+        self._add_event(task, "plan_revised", {"approval_id": approval.id if approval else None, "correction": correction})
+        if approval is None:
+            return self._advance_after_pre_execution_approval(task_id)
+        self._write_index(self.task_store.get_task(task.id), "Revised plan is pending approval gate: `plan`.")
+        return self.task_store.get_task(task_id)
+
+    def _next_plan_version(self, task_id: str) -> int:
+        versions = [
+            artifact.version or 0
+            for artifact in self.task_store.list_artifacts(task_id)
+            if artifact.kind in {"spec", "todo", "test_plan", "approval_request"}
+        ]
+        return max(versions, default=0) + 1
+
+    def _answer_question_and_close(self, task_id: str) -> Task:
+        task = self.task_store.get_task(task_id)
+        task.status = "closed"
+        task.closed_at = utc_now()
+        self.task_store.update_task(task)
+
+        answer = self.artifact_store.write_markdown(
+            task,
+            "answer",
+            "Answer",
+            self._answer_markdown(task),
+        )
+        final = self.artifact_store.write_markdown(
+            task,
+            "final_report",
+            "Final report",
+            "# Final report\n\nQuestion-only task closed without plan, execution, diff, or commit approval gates.\n",
+        )
+        self.task_store.add_artifact(answer)
+        self.task_store.add_artifact(final)
+        self._add_event(task, "question_answered", {"answer_artifact_id": answer.id})
+        self._write_index(self.task_store.get_task(task.id), "Task is closed.")
+        return self.task_store.get_task(task.id)
 
     def _advance_after_pre_execution_approval(self, task_id: str) -> Task:
         task = self.task_store.get_task(task_id)
@@ -336,23 +478,36 @@ class Orchestrator:
         self._write_index(self.task_store.get_task(task.id), f"Pending approval gate: `{gate}`.")
         return self.task_store.get_task(task.id)
 
+    def _loop_policy(self) -> LoopPolicy:
+        return LoopPolicy(
+            max_iterations=self.settings.loop_default_max_iterations,
+            max_changed_files=self.settings.loop_default_max_changed_files,
+            max_diff_lines=self.settings.loop_default_max_diff_lines,
+            repair_on_validation_failure=self.settings.loop_repair_on_validation_failure,
+            require_human_on_blocked_path=self.settings.loop_require_human_on_blocked_path,
+            require_human_on_config_change=self.settings.loop_require_human_on_config_change,
+        )
+
     def _run_execution(self, task_id: str) -> Task:
         task = self.task_store.get_task(task_id)
+        run = self.task_store.create_run(
+            task.id,
+            "execution",
+            executor=self.settings.default_executor,
+            model=self.settings.codex_model if self.settings.default_executor == "codex" else None,
+        )
         task.status = "approved_for_execution"
         self.task_store.update_task(task)
-        self._add_event(task, "approved_for_execution", {})
+        self._add_event(task, "approved_for_execution", {"run_id": run.id})
 
-        if self.settings.default_executor == "codex":
+        if self.settings.default_executor == "codex" and not task.worktree_path:
             task = self._prepare_worktree(task)
+        if self.settings.default_executor == "codex":
+            self._write_executor_policy(task)
 
         task.status = "executing"
         self.task_store.update_task(task)
         result = self.executor.execute(task, self.task_store.list_artifacts(task.id))
-        if task.worktree_path:
-            try:
-                result.changed_files = self.git_service.changed_files(Path(task.worktree_path))
-            except Exception as exc:
-                result.logs = (result.logs + "\n\n" if result.logs else "") + f"Could not read git changed files: {exc}"
         execution = self.artifact_store.write_markdown(
             task,
             "execution_log",
@@ -360,28 +515,97 @@ class Orchestrator:
             self._execution_markdown(task, result),
         )
         self.task_store.add_artifact(execution)
+        self._write_executor_result_artifacts(task, result)
         self._add_event(task, "execution_completed", result.model_dump())
+        self.task_store.add_step(
+            run.id,
+            1,
+            "execute",
+            "passed" if result.status == "success" else "failed",
+            input_summary=f"Executor `{self.settings.default_executor}`",
+            output_summary=result.summary,
+            artifact_ids=[execution.id],
+            error=None if result.status == "success" else result.logs,
+        )
+
+        if result.status != "success":
+            task.status = "changes_requested"
+            self.task_store.update_task(task)
+            validation = self.artifact_store.write_markdown(
+                task,
+                "validation_report",
+                "Validation report",
+                "# Validation\n\n"
+                f"Status: `skipped`\n\nExecution status is `{result.status}`. Review execution logs before continuing.\n",
+            )
+            self.task_store.add_artifact(validation)
+            self.task_store.add_step(
+                run.id,
+                2,
+                "validate",
+                "skipped",
+                output_summary="Execution did not succeed; validation skipped.",
+                artifact_ids=[validation.id],
+            )
+            evaluation = self.task_store.add_evaluation(
+                run.id,
+                task.id,
+                passed=False,
+                status="failed",
+                findings=[{"code": "executor_failed", "severity": "error", "message": f"Executor status: {result.status}"}],
+            )
+            eval_artifact = self.artifact_store.write_markdown(
+                task,
+                "evaluation_report",
+                "Evaluation report",
+                self._evaluation_markdown(evaluation),
+            )
+            self.task_store.add_artifact(eval_artifact)
+            self.task_store.add_step(
+                run.id,
+                3,
+                "evaluate",
+                "failed",
+                output_summary="Executor failed.",
+                artifact_ids=[eval_artifact.id],
+            )
+            self.task_store.finish_run(run.id, "failed", iteration_count=1, stop_reason="executor_failed")
+            self._write_run_artifacts(task, run.id)
+            self._add_event(task, "validation_skipped", {"reason": "execution_not_successful", "execution_status": result.status})
+            self._write_index(self.task_store.get_task(task.id), "Execution failed. Awaiting corrections.")
+            return self.task_store.get_task(task.id)
 
         task.status = "validating"
         self.task_store.update_task(task)
+        validation_result = self._run_validation(task)
         validation = self.artifact_store.write_markdown(
             task,
             "validation_report",
             "Validation report",
-            f"# Validation\n\n{self.validation_service.mock_report() if self.settings.default_executor == 'mock' else self._real_validation_report(task, result)}",
+            self.validation_service.markdown_report(validation_result),
         )
         self.task_store.add_artifact(validation)
-        self._add_event(task, "validation_completed", {"status": "recorded", "mode": self.settings.default_executor})
+        self._write_validation_command_outputs(task, validation_result)
+        self._add_event(task, "validation_completed", validation_result.model_dump())
+        self.task_store.add_step(
+            run.id,
+            2,
+            "validate",
+            "passed" if validation_result.status in {"passed", "skipped"} else "failed",
+            output_summary=validation_result.summary,
+            artifact_ids=[validation.id],
+        )
 
-        task.status = "reviewing"
-        self.task_store.update_task(task)
-        review = self.artifact_store.write_markdown(task, "review_report", "Review report", self._review_markdown(result))
         diff_patch = None
         diff_stat = "No source files were modified."
+        diff_text = ""
+        observation = None
         if task.worktree_path:
             try:
-                diff_stat = self.git_service.diff_stat(Path(task.worktree_path)).strip() or diff_stat
-                diff_text = self.git_service.diff_patch(Path(task.worktree_path))
+                observation = self.observer.observe(task.worktree_path, result, validation_result)
+                result.changed_files = observation.changed_files
+                diff_stat = observation.diff_stat.strip() or diff_stat
+                diff_text = observation.diff_patch
                 if diff_text.strip():
                     diff_patch = self.artifact_store.write_markdown(
                         task,
@@ -394,6 +618,93 @@ class Orchestrator:
                     self.task_store.add_artifact(diff_patch)
             except Exception as exc:
                 diff_stat = f"Could not collect git diff: {exc}"
+                result.logs = (result.logs + "\n\n" if result.logs else "") + diff_stat
+        self.task_store.add_step(
+            run.id,
+            3,
+            "observe",
+            "passed",
+            output_summary=f"{len(result.changed_files)} changed file(s).",
+            artifact_ids=[diff_patch.id] if diff_patch is not None else [],
+        )
+
+        approved_gates = {approval.gate for approval in self.task_store.list_approvals(task.id) if approval.status == "approved"}
+        project = self.projects.get(task.project_id or "") or {}
+        workflow = self.workflows.get(task.workflow_id or "") or {}
+        if observation is None:
+            from engineering_orchestrator.loop.observer import Observation
+
+            observation = Observation(
+                executor_result=result,
+                validation_result=validation_result,
+                changed_files=result.changed_files,
+                diff_stat=diff_stat,
+                diff_patch=diff_text,
+            )
+        loop_evaluation = self.evaluator.evaluate(observation, project, workflow, approved_gates)
+        evaluation = self.task_store.add_evaluation(
+            run.id,
+            task.id,
+            passed=loop_evaluation.passed,
+            status=loop_evaluation.status,
+            findings=loop_evaluation.findings,
+        )
+        eval_artifact = self.artifact_store.write_markdown(
+            task,
+            "evaluation_report",
+            "Evaluation report",
+            self._evaluation_markdown(evaluation),
+        )
+        self.task_store.add_artifact(eval_artifact)
+        self.task_store.add_step(
+            run.id,
+            4,
+            "evaluate",
+            loop_evaluation.status,
+            output_summary=f"Evaluation status: {loop_evaluation.status}",
+            artifact_ids=[eval_artifact.id],
+        )
+
+        policy_status, policy_markdown = self._evaluate_policy(task, result.changed_files, diff_text, loop_evaluation.findings)
+        policy_artifact = self.artifact_store.write_markdown(task, "policy_report", "Policy report", policy_markdown)
+        self.task_store.add_artifact(policy_artifact)
+        self._add_event(task, "policy_checked", {"status": policy_status})
+        if not loop_evaluation.passed:
+            if loop_evaluation.status == "repairable":
+                repair = self.artifact_store.write_markdown(
+                    task,
+                    "repair_prompt",
+                    "Repair prompt",
+                    self.repair_planner.build_prompt(loop_evaluation.findings, validation_result.summary, diff_text),
+                )
+                self.task_store.add_artifact(repair)
+                self.task_store.add_step(
+                    run.id,
+                    5,
+                    "repair",
+                    "stopped",
+                    output_summary="Repair prompt created; human or future loop iteration required.",
+                    artifact_ids=[repair.id],
+                )
+                task.status = "validation_failed"
+                stop_reason = "validation_failed"
+            else:
+                task.status = "changes_requested"
+                stop_reason = loop_evaluation.status
+            self.task_store.update_task(task)
+            self.task_store.finish_run(run.id, loop_evaluation.status, iteration_count=1, stop_reason=stop_reason)
+            self._write_run_artifacts(task, run.id)
+            self._write_index(self.task_store.get_task(task.id), "Evaluation did not pass. Awaiting corrections.")
+            return self.task_store.get_task(task.id)
+
+        task.status = "reviewing"
+        self.task_store.update_task(task)
+        review = self.artifact_store.write_markdown(
+            task,
+            "review_report",
+            "Review report",
+            self._review_markdown_structured(result, validation_result, evaluation, diff_stat),
+        )
         diff_summary = self.artifact_store.write_markdown(
             task,
             "diff_summary",
@@ -402,11 +713,21 @@ class Orchestrator:
         )
         self.task_store.add_artifact(review)
         self.task_store.add_artifact(diff_summary)
+        self.task_store.finish_run(run.id, "passed", iteration_count=1, stop_reason="evaluation_passed")
+        self._write_run_artifacts(task, run.id)
 
-        approval_artifacts = [validation.id, review.id, diff_summary.id]
+        approval_artifacts = [validation.id, eval_artifact.id, policy_artifact.id, review.id, diff_summary.id]
         if diff_patch is not None:
             approval_artifacts.append(diff_patch.id)
-        approval = self.task_store.create_approval(task.id, "diff", approval_artifacts, {"approves": ["commit gate", "close task"]})
+
+        reviewed_files = list(result.changed_files)
+        diff_payload = {"approves": ["commit gate", "close task"], "reviewed_files": reviewed_files}
+        if not self.settings.require_diff_approval:
+            self._add_event(task, "diff_approval_skipped", {"artifact_ids": approval_artifacts})
+            self._write_index(self.task_store.get_task(task.id), "Diff approval is disabled by policy.")
+            return self._advance_after_diff_approval(task.id)
+
+        approval = self.task_store.create_approval(task.id, "diff", approval_artifacts, diff_payload)
         task.status = "awaiting_diff_approval"
         self.task_store.update_task(task)
         self._add_event(task, "diff_approval_requested", {"approval_id": approval.id})
@@ -415,6 +736,12 @@ class Orchestrator:
 
     def _advance_after_diff_approval(self, task_id: str) -> Task:
         task = self.task_store.get_task(task_id)
+        if not self._latest_evaluation_passed(task.id):
+            task.status = "changes_requested"
+            self.task_store.update_task(task)
+            self._add_event(task, "diff_approval_blocked", {"reason": "latest_evaluation_not_passed"})
+            self._write_index(self.task_store.get_task(task.id), "Latest evaluation did not pass.")
+            return self.task_store.get_task(task.id)
         route_payload = task.route_decision or {}
         approval_gates = list(route_payload.get("approval_gates") or [])
         if self.settings.require_commit_approval and "commit" in approval_gates:
@@ -464,6 +791,7 @@ class Orchestrator:
             self.settings.worktrees_root,
             task.id,
             task.branch_name,
+            base_branch=str((self.projects.get(task.project_id or "") or {}).get("default_branch", "main")),
         )
         task.worktree_path = str(worktree_path)
         self.task_store.update_task(task)
@@ -495,6 +823,243 @@ Status: `{result.status}`
 ```
 """
 
+    def _write_executor_policy(self, task: Task):
+        artifact = self.artifact_store.write_markdown(
+            task,
+            "executor_policy",
+            "Executor policy",
+            self._executor_policy_markdown(task),
+        )
+        self.task_store.add_artifact(artifact)
+        return artifact
+
+    def _executor_policy_markdown(self, task: Task) -> str:
+        blocked = self.projects.blocked_paths(task.project_id)
+        allowed = self.projects.allowed_paths(task.project_id)
+        return f"""# Executor policy
+
+## Scope
+
+- Worktree: `{task.worktree_path or "not created"}`
+- Project: `{task.project_id or "unknown"}`
+- Do not commit changes.
+- Do not deploy.
+- Do not edit secrets or local environment files.
+
+## Allowed paths
+
+{self._bullet_list(allowed or ["Any source, test, or documentation path not blocked below."])}
+
+## Blocked paths
+
+{self._bullet_list(blocked)}
+
+## Limits
+
+- Max changed files: `{self.projects.max_changed_files(task.project_id)}`
+- Max diff bytes: `{self.projects.max_diff_bytes(task.project_id)}`
+"""
+
+    def _write_executor_result_artifacts(self, task: Task, result) -> None:
+        if result.prompt:
+            self.task_store.add_artifact(
+                self.artifact_store.write_markdown(task, "executor_prompt", "Executor prompt", result.prompt)
+            )
+        if result.command:
+            command_text = " ".join(result.command)
+            self.task_store.add_artifact(
+                self.artifact_store.write_markdown(
+                    task,
+                    "executor_command",
+                    "Executor command",
+                    f"# Executor command\n\n```text\n{command_text}\n```\n",
+                )
+            )
+        if result.stdout or self.settings.default_executor == "codex":
+            self.task_store.add_artifact(
+                self.artifact_store.write_markdown(
+                    task,
+                    "executor_stdout",
+                    "Executor stdout",
+                    f"# Executor stdout\n\n```text\n{result.stdout.strip() or '(empty)'}\n```\n",
+                )
+            )
+        if result.stderr or self.settings.default_executor == "codex":
+            self.task_store.add_artifact(
+                self.artifact_store.write_markdown(
+                    task,
+                    "executor_stderr",
+                    "Executor stderr",
+                    f"# Executor stderr\n\n```text\n{result.stderr.strip() or '(empty)'}\n```\n",
+                )
+            )
+
+    def _run_validation(self, task: Task):
+        if not self.settings.run_tests_after_execution:
+            from engineering_orchestrator.services.validation_service import ValidationResult
+
+            return ValidationResult(status="skipped", summary="Validation is disabled by orchestrator settings.")
+        commands = self.projects.test_commands(task.project_id)
+        return self.validation_service.run(commands, task.worktree_path)
+
+    def _write_validation_command_outputs(self, task: Task, validation_result) -> None:
+        existing_versions = [
+            artifact.version or 0
+            for artifact in self.task_store.list_artifacts(task.id)
+            if artifact.kind == "validation_command_output"
+        ]
+        version_offset = max(existing_versions, default=0)
+        for index, command in enumerate(validation_result.commands, start=1):
+            artifact = self.artifact_store.write_markdown(
+                task,
+                "validation_command_output",
+                f"Validation command {index}",
+                self.validation_service.command_output_markdown(command),
+                version=version_offset + index,
+            )
+            self.task_store.add_artifact(artifact)
+
+    def _evaluate_policy(
+        self,
+        task: Task,
+        changed_files: list[str],
+        diff_text: str,
+        evaluation_findings: list[dict[str, Any]] | None = None,
+    ) -> tuple[str, str]:
+        violations: list[str] = []
+        blocked = self.projects.blocked_paths(task.project_id)
+        allowed = self.projects.allowed_paths(task.project_id)
+        max_changed_files = self.projects.max_changed_files(task.project_id)
+        max_diff_bytes = self.projects.max_diff_bytes(task.project_id)
+
+        if len(changed_files) > max_changed_files:
+            violations.append(f"Changed file count `{len(changed_files)}` exceeds limit `{max_changed_files}`.")
+
+        diff_bytes = len(diff_text.encode("utf-8"))
+        if diff_bytes > max_diff_bytes:
+            violations.append(f"Diff size `{diff_bytes}` bytes exceeds limit `{max_diff_bytes}` bytes.")
+
+        for file_name in changed_files:
+            normalized = file_name.replace("\\", "/")
+            if any(self._path_matches(normalized, pattern) for pattern in blocked):
+                violations.append(f"Blocked path changed: `{file_name}`.")
+            if allowed and not any(self._path_matches(normalized, pattern) for pattern in allowed):
+                violations.append(f"Path is outside allowed_paths: `{file_name}`.")
+
+        structured_findings = evaluation_findings or []
+        status = "failed" if violations or any(finding.get("severity") == "error" for finding in structured_findings) else "passed"
+        markdown = f"""# Policy report
+
+Status: `{status}`
+
+## Changed files
+
+{self._bullet_list(changed_files)}
+
+## Limits
+
+- Max changed files: `{max_changed_files}`
+- Actual changed files: `{len(changed_files)}`
+- Max diff bytes: `{max_diff_bytes}`
+- Actual diff bytes: `{diff_bytes}`
+
+## Blocked paths
+
+{self._bullet_list(blocked)}
+
+## Allowed paths
+
+{self._bullet_list(allowed or ["No allow-list configured."])}
+
+## Violations
+
+{self._bullet_list(violations)}
+
+## Evaluation findings
+
+```json
+{json.dumps(structured_findings, ensure_ascii=False, indent=2)}
+```
+"""
+        return status, markdown
+
+    def _evaluation_markdown(self, evaluation) -> str:
+        return f"""# Evaluation
+
+Status: `{evaluation.status}`
+Passed: `{evaluation.passed}`
+Score: `{evaluation.score if evaluation.score is not None else "none"}`
+
+## Findings
+
+```json
+{json.dumps(evaluation.findings, ensure_ascii=False, indent=2)}
+```
+"""
+
+    def _write_run_artifacts(self, task: Task, run_id: str) -> None:
+        run = self.task_store.get_run(run_id)
+        steps = self.task_store.list_steps(run_id)
+        evaluations = self.task_store.list_evaluations(task.id)
+        payload = {
+            "run": run.model_dump(mode="json"),
+            "steps": [step.model_dump(mode="json") for step in steps],
+            "evaluations": [evaluation.model_dump(mode="json") for evaluation in evaluations if evaluation.run_id == run_id],
+        }
+        markdown = [
+            "# Run",
+            "",
+            f"- ID: `{run.id}`",
+            f"- Type: `{run.run_type}`",
+            f"- Status: `{run.status}`",
+            f"- Executor: `{run.executor or 'none'}`",
+            f"- Iterations: `{run.iteration_count}`",
+            f"- Stop reason: `{run.stop_reason or 'none'}`",
+            "",
+            "## Steps",
+            "",
+        ]
+        if steps:
+            for step in steps:
+                markdown.append(f"- `{step.step_index}` `{step.step_type}`: `{step.status}` - {step.output_summary or ''}".rstrip())
+        else:
+            markdown.append("- None.")
+        run_md = self.artifact_store.write_markdown(task, "run_report", "Run report", "\n".join(markdown) + "\n")
+        run_json = self.artifact_store.write_json(task, "run_report_json", "Run report JSON", payload)
+        self.task_store.add_artifact(run_md)
+        self.task_store.add_artifact(run_json)
+
+    def _path_matches(self, path: str, pattern: str) -> bool:
+        normalized_pattern = pattern.replace("\\", "/")
+        return path == normalized_pattern or fnmatch(path, normalized_pattern)
+
+    def _answer_markdown(self, task: Task) -> str:
+        return f"""# Answer
+
+This request was routed as `question_only`, so Tasker closed it without creating an execution plan or requesting code-change approvals.
+
+## Question
+
+> {task.user_message}
+
+## Route
+
+- Project: `{task.project_id or "unknown"}`
+- Workflow: `{task.workflow_id or "unknown"}`
+- Risk: `{task.risk_level or "unknown"}`
+
+## Answer
+
+No source files were modified. Use this task as a durable record of the question, route decision, context artifact, and final response. A future non-mock answer provider can replace this deterministic MVP response while keeping the same artifact contract.
+
+## Sources / Context used
+
+- Route decision
+- Project profile
+- Workflow policy
+- Context summary artifact
+"""
+
     def _real_validation_report(self, task: Task, result) -> str:
         if result.status != "success":
             return f"Execution status is `{result.status}`. Review execution logs before continuing."
@@ -520,8 +1085,75 @@ Status: `{result.status}`
 {result.summary}
 """
 
+    def _review_markdown_structured(self, result, validation_result, evaluation, diff_stat: str) -> str:
+        recommendation = "approve" if evaluation.passed else "request changes"
+        validation_lines = [
+            f"- `{command.command}`: `{command.status}`"
+            for command in getattr(validation_result, "commands", [])
+        ]
+        if not validation_lines:
+            validation_lines = [f"- `{validation_result.status}`: {validation_result.summary}"]
+        blocked_findings = [finding for finding in evaluation.findings if finding.get("code") == "blocked_path_changed"]
+        config_findings = [finding for finding in evaluation.findings if finding.get("code") == "config_change_requires_approval"]
+        diff_size = "too large" if any(finding.get("code") == "diff_line_limit_exceeded" for finding in evaluation.findings) else "ok"
+        return f"""# Review
+
+## Summary
+
+{result.summary}
+
+## Changed files
+
+{self._bullet_list(result.changed_files)}
+
+## Validation
+
+{chr(10).join(validation_lines)}
+
+## Evaluation
+
+- validation: `{validation_result.status}`
+- blocked paths: `{"found" if blocked_findings else "none"}`
+- config changes: `{"require approval" if config_findings else "none"}`
+- diff size: `{diff_size}`
+
+## Findings
+
+```json
+{json.dumps(evaluation.findings, ensure_ascii=False, indent=2)}
+```
+
+## Diff stat
+
+```text
+{diff_stat}
+```
+
+## Risks
+
+{self._bullet_list([finding.get("message", str(finding)) for finding in evaluation.findings] or ["No evaluation findings."])}
+
+## Recommendation
+
+{recommendation}
+"""
+
     def _commit_and_close(self, task_id: str) -> Task:
         task = self.task_store.get_task(task_id)
+        guard_error = self._commit_guard_error(task)
+        if guard_error:
+            task.status = "changes_requested"
+            self.task_store.update_task(task)
+            self._add_event(task, "commit_blocked", {"reason": guard_error})
+            blocked = self.artifact_store.write_markdown(
+                task,
+                "commit_result",
+                "Commit result",
+                f"# Commit result\n\nCommit blocked: {guard_error}\n",
+            )
+            self.task_store.add_artifact(blocked)
+            self._write_index(self.task_store.get_task(task.id), "Commit blocked; diff must be reviewed again.")
+            return self.task_store.get_task(task.id)
         task.status = "approved_for_commit"
         self.task_store.update_task(task)
         commit_hash = None
@@ -567,6 +1199,40 @@ Status: `{result.status}`
         slug = slugify(task.user_message, fallback="task").replace("-", " ")
         return f"{task.id}: {slug[:72]}".strip()
 
+    def _latest_evaluation_passed(self, task_id: str) -> bool:
+        evaluations = self.task_store.list_evaluations(task_id)
+        return bool(evaluations and evaluations[-1].passed)
+
+    def _approved_diff_approval(self, task_id: str):
+        approvals = [approval for approval in self.task_store.list_approvals(task_id) if approval.gate == "diff" and approval.status == "approved"]
+        return approvals[-1] if approvals else None
+
+    def _commit_guard_error(self, task: Task) -> str | None:
+        if self.settings.require_diff_approval and self._approved_diff_approval(task.id) is None:
+            return "missing approved diff approval"
+        if not self._latest_evaluation_passed(task.id):
+            return "latest evaluation did not pass"
+        unresolved = [
+            approval.gate
+            for approval in self.task_store.list_approvals(task.id)
+            if approval.status == "pending" and approval.gate != "commit"
+        ]
+        if unresolved:
+            return f"unresolved approvals: {', '.join(unresolved)}"
+        if not task.worktree_path:
+            return None
+        worktree = Path(task.worktree_path)
+        try:
+            self.git_service.diff_check(worktree)
+            current_files = self.git_service.changed_files(worktree)
+        except Exception as exc:
+            return f"git pre-commit observe failed: {exc}"
+        approval = self._approved_diff_approval(task.id)
+        payload = approval.requested_payload if approval else {}
+        if "reviewed_files" in payload and sorted(list(payload.get("reviewed_files") or [])) != sorted(current_files):
+            return "changed files differ from approved diff"
+        return None
+
     def _add_event(self, task: Task, event_type: str, payload: dict | None = None) -> None:
         current = self.task_store.get_task(task.id)
         self.event_service.add(current, event_type, payload or {})
@@ -580,6 +1246,7 @@ Status: `{result.status}`
             task_id=task.id,
             project_id=task.project_id,
             slug=slugify(task.user_message),
+            slug_short=slugify_short(task.user_message),
         ).strip()
         if new_dir == old_dir:
             return task
@@ -619,6 +1286,10 @@ Status: `{result.status}`
             artifacts_dir=task.artifacts_dir,
             current_approval_gate=gate,
         )
+
+    def _pending_gate(self, task: Task) -> str | None:
+        pending = [approval for approval in self.task_store.list_approvals(task.id) if approval.status == "pending"]
+        return pending[0].gate if pending else None
 
     def _route_markdown(self, task: Task, route: RouteDecision) -> str:
         return f"""# Route decision
@@ -751,6 +1422,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="engineering_orchestrator", version="0.1.0")
     orchestrator = Orchestrator(settings or load_settings())
     app.state.orchestrator = orchestrator
+    register_ui_routes(app, orchestrator)
 
     @app.get("/health")
     def health():
@@ -759,6 +1431,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/tasks", response_model=CreateTaskResponse)
     def create_task(request: CreateTaskRequest):
         return orchestrator.create_task(request)
+
+    @app.get("/tasks")
+    def list_tasks(status: str | None = None, project_id: str | None = None, limit: int = 100):
+        return orchestrator.list_tasks(status, project_id, limit)
 
     @app.get("/tasks/{task_id}")
     def get_task(task_id: str):
@@ -779,6 +1455,55 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def read_artifact(task_id: str, kind: str, version: int | None = None):
         try:
             return {"content": orchestrator.read_artifact(task_id, kind, version)}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/tasks/{task_id}/approvals")
+    def list_approvals(task_id: str):
+        try:
+            return orchestrator.list_approvals(task_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/tasks/{task_id}/events")
+    def list_events(task_id: str):
+        try:
+            return orchestrator.list_events(task_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/tasks/{task_id}/context")
+    def get_context(task_id: str):
+        try:
+            return orchestrator.get_context(task_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/tasks/{task_id}/rebuild-context")
+    def rebuild_context(task_id: str):
+        try:
+            return orchestrator.rebuild_context(task_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/tasks/{task_id}/runs")
+    def list_runs(task_id: str):
+        try:
+            return orchestrator.list_runs(task_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/runs/{run_id}")
+    def get_run(run_id: str):
+        try:
+            return orchestrator.get_run(run_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/runs/{run_id}/steps")
+    def list_steps(run_id: str):
+        try:
+            return orchestrator.list_steps(run_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

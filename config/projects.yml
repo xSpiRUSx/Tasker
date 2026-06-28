@@ -20,6 +20,19 @@ projects:
     description: FastAPI billing backend sample project.
     tools:
       - codex
+    test_commands:
+      - pytest
+    blocked_paths:
+      - .env
+      - .env.*
+      - secrets/**
+    allowed_paths:
+      - src/**
+      - tests/**
+      - docs/**
+      - README.md
+    max_changed_files: 50
+    max_diff_bytes: 250000
 
   - id: generic
     name: Generic Project
@@ -30,6 +43,15 @@ projects:
     description: Default local project used when the request does not mention a configured project.
     tools:
       - codex
+    test_commands:
+      - python -m pytest
+    blocked_paths:
+      - .env
+      - .env.*
+      - secrets/**
+      - data/**
+    max_changed_files: 100
+    max_diff_bytes: 500000
 
   - id: solvix_zn
     name: Solvix_ZN
@@ -37,6 +59,28 @@ projects:
     aliases: ["solvix", "solvix_zn", "zn", "зн", "сольвикс"]
     description: Рабочий проект в каталоге C:\Configuration\Solvix_ZN.
     tools: ["codex"]
+    project_type: 1c
+    metadata_root: src/cfe
+    external_artifacts_root: external
+    validation_profile: 1c
+    test_commands:
+      - python -m pytest
+    blocked_paths:
+      - .env
+      - .env.*
+      - secrets/**
+      - data/**
+    allowed_external_artifact_paths:
+      - artifacts/**
+      - external/**
+    risky_areas:
+      - roles
+      - permissions
+      - exchanges
+      - регистры
+      - справочники
+    max_changed_files: 100
+    max_diff_bytes: 500000
 
   - id: sq_erp_ext
     name: Снежная королева ЕРП
@@ -44,3 +88,25 @@ projects:
     aliases: ["sq_erp_ext", "sq erp", "erp_ext", "снежная королева", "снежная королева ерп", "ск ерп"]
     description: Проект Снежная королева ЕРП в каталоге C:\Configuration\SQ_ERP\ERP_Ext.
     tools: ["codex", "1c-graph-metadata-mcp"]
+    project_type: 1c
+    metadata_root: src/cfe
+    external_artifacts_root: external
+    validation_profile: 1c
+    test_commands:
+      - python -m pytest
+    blocked_paths:
+      - .env
+      - .env.*
+      - secrets/**
+      - data/**
+    allowed_external_artifact_paths:
+      - artifacts/**
+      - external/**
+    risky_areas:
+      - roles
+      - permissions
+      - exchanges
+      - регистры
+      - справочники
+    max_changed_files: 100
+    max_diff_bytes: 500000

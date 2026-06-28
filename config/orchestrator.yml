@@ -7,7 +7,7 @@ storage:
 
 artifacts:
   root_path: "D:/Obsidian/TaskStore"
-  task_folder_template: "{task_id} - {project_id} {slug}"
+  task_folder_template: "{task_id} - {project_id} - {slug_short}"
   write_frontmatter: true
   keep_versions: true
   use_relative_paths_in_db: true
@@ -18,7 +18,7 @@ router:
   workflows_path: "./config/workflows.yml"
 
 planning:
-  provider: "codex-cli"
+  provider: "mock"
   model: null
   timeout_seconds: 900
 
@@ -32,6 +32,32 @@ execution:
 
 validation:
   run_tests_after_execution: true
+  command_timeout_seconds: 600
+  fail_on_missing_commands: false
+
+loop:
+  default_max_iterations: 2
+  default_max_runtime_seconds: 1800
+  default_max_changed_files: 12
+  default_max_diff_lines: 1200
+  repair_on_validation_failure: true
+  require_human_on_blocked_path: true
+  require_human_on_config_change: true
+
+  workflows:
+    simple_dev_no_config:
+      max_iterations: 2
+      max_changed_files: 8
+      max_diff_lines: 800
+
+    simple_dev_with_config:
+      max_iterations: 2
+      max_changed_files: 12
+      max_diff_lines: 1200
+
+    complex_change:
+      max_iterations: 1
+      require_human_on_each_phase: true
 
 approvals:
   require_plan_approval: true

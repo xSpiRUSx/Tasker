@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tasker Tasks</title>
+  <style>
+    :root { color-scheme: light; --line: #d8dee8; --ink: #17202a; --muted: #5d6b7a; --fill: #f6f8fb; --accent: #0f766e; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Segoe UI, Arial, sans-serif; color: var(--ink); background: #fff; }
+    header { border-bottom: 1px solid var(--line); padding: 14px 22px; display: flex; gap: 16px; align-items: center; justify-content: space-between; }
+    main { padding: 20px 22px; max-width: 1180px; margin: 0 auto; }
+    h1 { font-size: 22px; margin: 0; font-weight: 650; }
+    form { display: flex; gap: 8px; align-items: center; }
+    input { height: 34px; border: 1px solid var(--line); border-radius: 6px; padding: 0 10px; min-width: 260px; }
+    button, a.button { height: 34px; border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: 6px; padding: 0 12px; text-decoration: none; display: inline-flex; align-items: center; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    th, td { border-bottom: 1px solid var(--line); padding: 10px 8px; text-align: left; vertical-align: top; font-size: 14px; }
+    th { background: var(--fill); font-size: 12px; text-transform: uppercase; color: var(--muted); letter-spacing: .02em; }
+    td code { font-family: Consolas, monospace; font-size: 13px; }
+    .status { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #e7f5f2; color: #0b5d55; white-space: nowrap; }
+    .muted { color: var(--muted); }
+    .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Tasker</h1>
+    <form method="get" action="/ui/tasks">
+      <input name="status" value="{{ status }}" placeholder="status">
+      <button type="submit">Filter</button>
+      <a class="button" href="/ui/tasks">All</a>
+    </form>
+  </header>
+  <main>
+    <table>
+      <thead>
+        <tr>
+          <th style="width: 160px;">Task</th>
+          <th style="width: 190px;">Status</th>
+          <th style="width: 160px;">Project</th>
+          <th>Request</th>
+          <th style="width: 190px;">Updated</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for task in tasks %}
+        <tr>
+          <td><a href="/ui/tasks/{{ task.id }}"><code>{{ task.id }}</code></a></td>
+          <td><span class="status">{{ task.status }}</span></td>
+          <td><code>{{ task.project_id or "unknown" }}</code></td>
+          <td class="truncate">{{ task.user_message }}</td>
+          <td class="muted">{{ task.updated_at }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="muted">No tasks.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </main>
+</body>
+</html>

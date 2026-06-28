@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import uuid
 from pathlib import Path
@@ -15,12 +16,27 @@ FILENAME_BY_KIND: dict[str, str] = {
     "request": "00-request.md",
     "route_decision": "01-route.md",
     "context_summary": "02-context.md",
+    "working_memory": "02-working-memory.md",
+    "working_memory_json": "02-working-memory.json",
+    "answer": "03-answer.md",
     "spec": "03-spec.v{version}.md",
     "todo": "04-todo.v{version}.md",
     "test_plan": "05-test-plan.v{version}.md",
     "approval_request": "06-approval-plan.v{version}.md",
     "execution_log": "07-execution.md",
+    "executor_policy": "07-executor-policy.md",
+    "executor_prompt": "07-executor-prompt.md",
+    "executor_command": "07-executor-command.md",
+    "executor_stdout": "07-executor-stdout.md",
+    "executor_stderr": "07-executor-stderr.md",
     "validation_report": "08-validation.md",
+    "validation_command_output": "08-validation-command-{version}.md",
+    "policy_report": "09-policy.md",
+    "run_report": "07-run.md",
+    "run_report_json": "07-run.json",
+    "evaluation_report": "08-evaluation.md",
+    "repair_prompt": "08-repair-prompt.md",
+    "diagnosis": "09-diagnosis.md",
     "review_report": "09-review.md",
     "diff_summary": "10-diff-summary.md",
     "diff_patch": "10-diff.patch",
@@ -33,6 +49,39 @@ FILENAME_BY_KIND: dict[str, str] = {
 }
 
 
+NON_VERSIONED_ARTIFACT_KINDS: set[str] = {
+    "task_index",
+    "request",
+    "route_decision",
+    "context_summary",
+    "working_memory",
+    "working_memory_json",
+    "answer",
+    "execution_log",
+    "executor_policy",
+    "executor_prompt",
+    "executor_command",
+    "executor_stdout",
+    "executor_stderr",
+    "validation_report",
+    "policy_report",
+    "run_report",
+    "run_report_json",
+    "evaluation_report",
+    "repair_prompt",
+    "diagnosis",
+    "review_report",
+    "diff_summary",
+    "diff_patch",
+    "commit_message",
+    "commit_result",
+    "deploy_plan",
+    "rollback_plan",
+    "final_report",
+    "events",
+}
+
+
 def slugify(value: str, fallback: str = "task") -> str:
     value = value.lower()
     value = re.sub(r"[^a-z0-9а-яё]+", "-", value, flags=re.IGNORECASE).strip("-")
@@ -40,12 +89,20 @@ def slugify(value: str, fallback: str = "task") -> str:
     return value[:80] or fallback
 
 
+def slugify_short(value: str, fallback: str = "task", max_prefix: int = 46, hash_length: int = 5) -> str:
+    slug = slugify(value, fallback=fallback)
+    digest = hashlib.sha1(value.encode("utf-8")).hexdigest()[:hash_length]
+    if len(slug) <= max_prefix:
+        return f"{slug}-{digest}"
+    return f"{slug[:max_prefix].rstrip('-')}-{digest}"
+
+
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 class ArtifactStore:
-    def __init__(self, root_path: str | Path, task_folder_template: str = "{task_id} - {project_id} {slug}"):
+    def __init__(self, root_path: str | Path, task_folder_template: str = "{task_id} - {project_id} - {slug_short}"):
         self.root_path = Path(root_path)
         self.task_folder_template = task_folder_template
         self.root_path.mkdir(parents=True, exist_ok=True)
@@ -55,6 +112,7 @@ class ArtifactStore:
             task_id=task.id,
             project_id=task.project_id or "unrouted",
             slug=slugify(slug),
+            slug_short=slugify_short(slug),
         ).strip()
         folder = self.root_path / folder_name
         folder.mkdir(parents=True, exist_ok=True)
@@ -96,6 +154,26 @@ class ArtifactStore:
             updated_at=now,
         )
 
+    def write_json(
+        self,
+        task: Task,
+        kind: ArtifactKind,
+        title: str,
+        payload: dict[str, Any] | list[Any],
+        filename: str | None = None,
+    ) -> TaskArtifact:
+        content = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+        artifact = self.write_markdown(
+            task,
+            kind,
+            title,
+            content,
+            filename=filename,
+            include_frontmatter=False,
+        )
+        artifact.content_type = "application/json"
+        return artifact
+
     def read_text(self, artifact: TaskArtifact) -> str:
         return (self.root_path / artifact.relative_path).read_text(encoding="utf-8")
 
@@ -109,9 +187,16 @@ class ArtifactStore:
         current_approval_summary: str = "No pending approval.",
     ) -> TaskArtifact:
         artifact_lines = []
+        seen: set[tuple[str, str, int | None]] = set()
         for artifact in artifacts or []:
+            if artifact.kind == "task_index":
+                continue
             label = artifact.title
             target = Path(artifact.relative_path).name
+            key = (artifact.kind, target, artifact.version)
+            if key in seen:
+                continue
+            seen.add(key)
             artifact_lines.append(f"- [[{target}|{label}]]")
         if not artifact_lines:
             artifact_lines.append("- No artifacts yet.")

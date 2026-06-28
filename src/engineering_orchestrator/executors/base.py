@@ -12,6 +12,11 @@ class ExecutionResult(BaseModel):
     changed_files: list[str] = Field(default_factory=list)
     summary: str
     logs: str = ""
+    command: list[str] = Field(default_factory=list)
+    prompt: str = ""
+    stdout: str = ""
+    stderr: str = ""
+    timed_out: bool = False
 
 
 class Executor(Protocol):

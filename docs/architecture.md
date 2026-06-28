@@ -10,6 +10,10 @@ src/
   engineering_assistant/
   engineering_orchestrator/
   task_router/
+tests/
+  orchestrator/
+  task_router/
+  fixtures/
 ```
 
 ## Components
@@ -22,7 +26,8 @@ Endpoints:
 
 - `POST /route` - debug/test endpoint for routing only.
 - `POST /tasks` - full orchestration lifecycle.
-- `GET /tasks/{task_id}` and artifact/approval endpoints.
+- `GET /tasks` - task inbox with optional `status` filter.
+- `GET /tasks/{task_id}` and artifact, approval, event endpoints.
 
 ### `task_router`
 
@@ -83,6 +88,9 @@ The executor is selected by `execution.default_executor` or
 - `codex` creates a git worktree, runs `codex exec` inside it, records changed
   files, and writes diff artifacts for review.
 
+Question-only workflows stop after route and context collection. They write an
+answer artifact and final report, then close without approval gates.
+
 Pre-execution gates such as `spec`, `config_change`, `migration`,
 `security_change`, and `deploy_prep` block execution until approved.
 
@@ -107,6 +115,7 @@ Stable artifact kinds should be treated as product API:
 - `task_index`
 - `route_decision`
 - `context_summary`
+- `answer`
 - `spec`
 - `todo`
 - `test_plan`

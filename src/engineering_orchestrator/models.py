@@ -23,6 +23,7 @@ TaskStatus = Literal[
     "executing",
     "validating",
     "reviewing",
+    "validation_failed",
     "awaiting_diff_approval",
     "changes_requested",
     "awaiting_commit_approval",
@@ -40,12 +41,27 @@ ArtifactKind = Literal[
     "request",
     "route_decision",
     "context_summary",
+    "working_memory",
+    "working_memory_json",
+    "answer",
     "spec",
     "todo",
     "test_plan",
     "approval_request",
     "execution_log",
+    "executor_policy",
+    "executor_prompt",
+    "executor_command",
+    "executor_stdout",
+    "executor_stderr",
     "validation_report",
+    "validation_command_output",
+    "policy_report",
+    "run_report",
+    "run_report_json",
+    "evaluation_report",
+    "repair_prompt",
+    "diagnosis",
     "diff_summary",
     "diff_patch",
     "review_report",
@@ -116,6 +132,44 @@ class TaskEvent(BaseModel):
     task_id: str
     event_type: str
     payload: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class AgentRun(BaseModel):
+    id: str
+    task_id: str
+    run_type: str
+    status: str
+    executor: str | None = None
+    model: str | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+    iteration_count: int = 0
+    stop_reason: str | None = None
+
+
+class AgentStep(BaseModel):
+    id: str
+    run_id: str
+    step_index: int
+    step_type: str
+    status: str
+    input_summary: str | None = None
+    output_summary: str | None = None
+    artifact_ids: list[str] = Field(default_factory=list)
+    started_at: datetime
+    finished_at: datetime | None = None
+    error: str | None = None
+
+
+class EvaluationResult(BaseModel):
+    id: str
+    run_id: str
+    task_id: str
+    passed: bool
+    score: float | None = None
+    status: str
+    findings: list[dict[str, Any]] = Field(default_factory=list)
     created_at: datetime
 
 

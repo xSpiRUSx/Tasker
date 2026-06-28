@@ -22,3 +22,24 @@ class ProjectRegistry:
 
     def get(self, project_id: str) -> dict[str, Any] | None:
         return next((project for project in self.projects if project.get("id") == project_id), None)
+
+    def test_commands(self, project_id: str | None) -> list[str]:
+        project = self.get(project_id) if project_id else None
+        return [str(command) for command in (project or {}).get("test_commands", [])]
+
+    def blocked_paths(self, project_id: str | None) -> list[str]:
+        project = self.get(project_id) if project_id else None
+        defaults = [".env", ".env.*", "secrets/**", "**/secrets/**"]
+        return [*defaults, *[str(pattern) for pattern in (project or {}).get("blocked_paths", [])]]
+
+    def allowed_paths(self, project_id: str | None) -> list[str]:
+        project = self.get(project_id) if project_id else None
+        return [str(pattern) for pattern in (project or {}).get("allowed_paths", [])]
+
+    def max_changed_files(self, project_id: str | None) -> int:
+        project = self.get(project_id) if project_id else None
+        return int((project or {}).get("max_changed_files", 100))
+
+    def max_diff_bytes(self, project_id: str | None) -> int:
+        project = self.get(project_id) if project_id else None
+        return int((project or {}).get("max_diff_bytes", 500_000))

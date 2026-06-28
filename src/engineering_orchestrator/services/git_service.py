@@ -3,6 +3,16 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from pydantic import BaseModel
+
+
+class GitStatusEntry(BaseModel):
+    path: str
+    status: str
+    is_untracked: bool = False
+    is_deleted: bool = False
+    is_modified: bool = False
+
 
 class GitService:
     def create_worktree(
@@ -44,30 +54,66 @@ class GitService:
         return self._git(worktree_path, ["status", "--short"])
 
     def changed_files(self, worktree_path: Path) -> list[str]:
-        output = self._git(worktree_path, ["diff", "--name-only", "HEAD"])
-        return [line for line in output.splitlines() if line.strip()]
+        return sorted({entry.path for entry in self.get_status_entries(worktree_path)})
+
+    def get_status_entries(self, worktree_path: Path) -> list[GitStatusEntry]:
+        output = self._git(worktree_path, ["status", "--porcelain"])
+        entries: list[GitStatusEntry] = []
+        for line in output.splitlines():
+            if not line.strip():
+                continue
+            status = line[:2]
+            path = line[3:].strip()
+            if " -> " in path:
+                path = path.split(" -> ", 1)[1].strip()
+            entries.append(
+                GitStatusEntry(
+                    path=path,
+                    status=status,
+                    is_untracked=status == "??",
+                    is_deleted="D" in status,
+                    is_modified=any(marker in status for marker in ("M", "A", "R", "C", "?", "D")),
+                )
+            )
+        return entries
 
     def diff_stat(self, worktree_path: Path) -> str:
+        self._mark_untracked_for_diff(worktree_path)
         return self._git(worktree_path, ["diff", "--stat", "HEAD"])
 
     def diff_patch(self, worktree_path: Path) -> str:
+        self._mark_untracked_for_diff(worktree_path)
         return self._git(worktree_path, ["diff", "HEAD"])
 
     def commit(self, worktree_path: Path, message: str) -> str:
-        check = subprocess.run(["git", "-C", str(worktree_path), "diff", "--check"], check=False, text=True, capture_output=True)
-        if check.returncode != 0:
-            raise RuntimeError(check.stderr.strip() or check.stdout.strip())
+        self.diff_check(worktree_path)
         subprocess.run(["git", "-C", str(worktree_path), "add", "-A"], check=False, text=True, capture_output=True)
         result = subprocess.run(["git", "-C", str(worktree_path), "commit", "-m", message], check=False, text=True, capture_output=True)
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or result.stdout.strip())
         return self._git(worktree_path, ["rev-parse", "HEAD"]).strip()
 
+    def diff_check(self, worktree_path: Path) -> str:
+        check = subprocess.run(["git", "-C", str(worktree_path), "diff", "--check"], check=False, text=True, capture_output=True)
+        if check.returncode != 0:
+            raise RuntimeError(check.stderr.strip() or check.stdout.strip())
+        return check.stdout
+
     def _git(self, worktree_path: Path, args: list[str]) -> str:
         result = subprocess.run(["git", "-C", str(worktree_path), *args], check=False, text=True, capture_output=True)
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or result.stdout.strip())
         return result.stdout
+
+    def _mark_untracked_for_diff(self, worktree_path: Path) -> None:
+        result = subprocess.run(
+            ["git", "-C", str(worktree_path), "add", "--intent-to-add", "--", "."],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or result.stdout.strip())
 
     def _ref_exists(self, repository_path: Path, ref: str) -> bool:
         result = subprocess.run(

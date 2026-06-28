@@ -42,16 +42,31 @@ class CodexExecutor:
         if self.model:
             command.extend(["--model", self.model])
 
-        completed = subprocess.run(
-            self._windows_command(command),
-            cwd=worktree_path,
-            input=self._build_prompt(task, artifacts),
-            text=True,
-            encoding="utf-8",
-            capture_output=True,
-            timeout=self.timeout_seconds,
-            check=False,
-        )
+        prompt = self._build_prompt(task, artifacts)
+        try:
+            completed = subprocess.run(
+                self._windows_command(command),
+                cwd=worktree_path,
+                input=prompt,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                timeout=self.timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return ExecutionResult(
+                status="failed",
+                changed_files=[],
+                summary=f"Codex CLI timed out after {self.timeout_seconds} seconds.",
+                logs=self._timeout_logs(exc),
+                command=command,
+                prompt=prompt,
+                stdout=self._decode_timeout_output(exc.stdout),
+                stderr=self._decode_timeout_output(exc.stderr),
+                timed_out=True,
+            )
 
         logs = self._logs(completed)
         if completed.returncode != 0:
@@ -60,6 +75,10 @@ class CodexExecutor:
                 changed_files=[],
                 summary=f"Codex CLI failed with exit code {completed.returncode}.",
                 logs=logs,
+                command=command,
+                prompt=prompt,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
             )
 
         return ExecutionResult(
@@ -67,6 +86,10 @@ class CodexExecutor:
             changed_files=[],
             summary="Codex CLI execution completed. Inspect the generated diff before approving.",
             logs=logs,
+            command=command,
+            prompt=prompt,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
         )
 
     def _build_prompt(self, task: Task, artifacts: list[TaskArtifact]) -> str:
@@ -100,6 +123,7 @@ Instructions:
 - Do not commit changes.
 - Do not change secrets.
 - Do not deploy.
+- Respect any executor policy artifact below, including allowed paths, blocked paths, diff size, and changed-file limits.
 - Prefer small, focused changes.
 - Run relevant local checks when they are obvious and safe.
 - If the task cannot be completed, leave clear notes in your final output.
@@ -129,3 +153,21 @@ Artifacts:
         if stderr:
             chunks.append("STDERR\n" + stderr)
         return "\n\n".join(chunks)
+
+    def _timeout_logs(self, exc: subprocess.TimeoutExpired) -> str:
+        chunks = []
+        stdout = self._decode_timeout_output(exc.stdout).strip()
+        stderr = self._decode_timeout_output(exc.stderr).strip()
+        if stdout:
+            chunks.append("STDOUT\n" + stdout)
+        if stderr:
+            chunks.append("STDERR\n" + stderr)
+        chunks.append(f"Process timed out after {self.timeout_seconds} seconds.")
+        return "\n\n".join(chunks)
+
+    def _decode_timeout_output(self, value: str | bytes | None) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        return value

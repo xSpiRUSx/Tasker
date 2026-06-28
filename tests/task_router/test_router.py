@@ -11,7 +11,7 @@ from task_router.heuristics import infer_intent, infer_project_id, infer_task_ki
 from task_router.models import ProjectConfig, RouterConfig, ToolConfig, WorkflowConfig
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "task_router"
 
 
 def test_mock_routes_any_task_to_solvix_simple_question():

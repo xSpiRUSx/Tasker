@@ -14,7 +14,8 @@ The project is a modular monolith:
 - `engineering_orchestrator` owns the task lifecycle, approvals, artifacts,
   execution, validation, review, and closure.
 
-All runtime source packages live under `src/`.
+Runtime source packages live under `src/`; tests and test fixtures live under
+`tests/`.
 
 ## Environment
 
@@ -47,8 +48,8 @@ cd C:\Configuration\Tasker
 python -m pytest
 ```
 
-The root test command includes unified app tests plus the legacy router and
-orchestrator test suites.
+The root test command includes unified app tests plus router and orchestrator
+module tests.
 
 ## Architecture Direction
 

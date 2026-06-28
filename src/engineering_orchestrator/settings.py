@@ -46,6 +46,13 @@ class Settings:
     require_plan_approval: bool
     require_diff_approval: bool
     require_commit_approval: bool
+    loop_default_max_iterations: int = 2
+    loop_default_max_runtime_seconds: int = 1800
+    loop_default_max_changed_files: int = 12
+    loop_default_max_diff_lines: int = 1200
+    loop_repair_on_validation_failure: bool = True
+    loop_require_human_on_blocked_path: bool = True
+    loop_require_human_on_config_change: bool = True
 
 
 def load_settings(config_path: str | Path | None = None) -> Settings:
@@ -66,6 +73,7 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
     execution = data.get("execution", {})
     validation = data.get("validation", {})
     approvals = data.get("approvals", {})
+    loop = data.get("loop", {})
 
     sqlite_path = os.getenv("ORCHESTRATOR_SQLITE_PATH", storage.get("sqlite_path", "./data/orchestrator.sqlite3"))
     artifacts_root = os.getenv("ORCHESTRATOR_ARTIFACTS_ROOT", artifacts.get("root_path", "./data/obsidian-tasks"))
@@ -81,7 +89,7 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
         timezone=str(orchestrator.get("timezone", "UTC")),
         sqlite_path=_resolve_path(base_dir, sqlite_path),
         artifacts_root=_resolve_path(base_dir, artifacts_root),
-        task_folder_template=str(artifacts.get("task_folder_template", "{task_id} - {project_id} {slug}")),
+        task_folder_template=str(artifacts.get("task_folder_template", "{task_id} - {project_id} - {slug_short}")),
         router_provider=str(router_provider),
         projects_path=_resolve_path(base_dir, router.get("projects_path", "./config/projects.yml")),
         workflows_path=_resolve_path(base_dir, router.get("workflows_path", "./config/workflows.yml")),
@@ -98,4 +106,11 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
         require_plan_approval=bool(approvals.get("require_plan_approval", True)),
         require_diff_approval=bool(approvals.get("require_diff_approval", True)),
         require_commit_approval=bool(approvals.get("require_commit_approval", True)),
+        loop_default_max_iterations=int(loop.get("default_max_iterations", 2)),
+        loop_default_max_runtime_seconds=int(loop.get("default_max_runtime_seconds", 1800)),
+        loop_default_max_changed_files=int(loop.get("default_max_changed_files", 12)),
+        loop_default_max_diff_lines=int(loop.get("default_max_diff_lines", 1200)),
+        loop_repair_on_validation_failure=bool(loop.get("repair_on_validation_failure", True)),
+        loop_require_human_on_blocked_path=bool(loop.get("require_human_on_blocked_path", True)),
+        loop_require_human_on_config_change=bool(loop.get("require_human_on_config_change", True)),
     )

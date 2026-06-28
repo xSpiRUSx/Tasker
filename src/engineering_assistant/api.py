@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from engineering_assistant.settings import load_settings
 from engineering_assistant.task_router import TaskRouter
 from engineering_orchestrator.api import Orchestrator
-from engineering_orchestrator.models import ApprovalDecisionRequest, ContinueTaskRequest, CreateTaskRequest
+from engineering_orchestrator.models import ApprovalDecisionRequest, CancelTaskRequest, ContinueTaskRequest, CreateTaskRequest
 from engineering_orchestrator.settings import Settings
 from engineering_orchestrator.ui import register_ui_routes
 
@@ -18,6 +19,13 @@ class RouteRequest(BaseModel):
 def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="engineering_assistant", version="0.1.0")
     resolved_settings = settings or load_settings()
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(resolved_settings.cors_origins),
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     router = TaskRouter(
         resolved_settings.projects_path,
         resolved_settings.workflows_path,
@@ -41,8 +49,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return orchestrator.create_task(request)
 
     @app.get("/tasks")
-    def list_tasks(status: str | None = None, project_id: str | None = None, limit: int = 100):
-        return orchestrator.list_tasks(status, project_id, limit)
+    def list_tasks(
+        status: str | None = None,
+        project_id: str | None = None,
+        workflow_id: str | None = None,
+        q: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        return orchestrator.list_tasks_page(status, project_id, workflow_id, q, limit, offset)
 
     @app.get("/tasks/{task_id}")
     def get_task(task_id: str):
@@ -59,6 +74,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @app.get("/tasks/{task_id}/artifacts/by-id/{artifact_id}")
+    def read_artifact_by_id(task_id: str, artifact_id: str):
+        try:
+            return orchestrator.read_artifact_by_id(task_id, artifact_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.get("/tasks/{task_id}/artifacts/{kind}")
     def read_artifact(task_id: str, kind: str, version: int | None = None):
         try:
@@ -66,17 +88,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @app.post("/tasks/{task_id}/cancel")
+    def cancel_task(task_id: str, request: CancelTaskRequest):
+        try:
+            return orchestrator.cancel_task(task_id, request)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     @app.get("/tasks/{task_id}/approvals")
     def list_approvals(task_id: str):
         try:
-            return orchestrator.list_approvals(task_id)
+            return {"items": orchestrator.list_approvals(task_id)}
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/tasks/{task_id}/events")
     def list_events(task_id: str):
         try:
-            return orchestrator.list_events(task_id)
+            return {"items": orchestrator.list_events(task_id)}
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

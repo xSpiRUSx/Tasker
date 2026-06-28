@@ -6,11 +6,13 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
 from engineering_orchestrator.harness import ContextBuilder, PromptBuilder
 from engineering_orchestrator.loop import Evaluator, LoopPolicy, Observer, RepairPlanner
 from engineering_orchestrator.models import (
     ApprovalDecisionRequest,
+    CancelTaskRequest,
     ContinueTaskRequest,
     CreateTaskRequest,
     CreateTaskResponse,
@@ -115,6 +117,30 @@ class Orchestrator:
     def list_tasks(self, status: str | None = None, project_id: str | None = None, limit: int = 100) -> list[Task]:
         return self.task_store.list_tasks(status, project_id=project_id, limit=limit)  # type: ignore[arg-type]
 
+    def list_tasks_page(
+        self,
+        status: str | None = None,
+        project_id: str | None = None,
+        workflow_id: str | None = None,
+        q: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        tasks, total = self.task_store.list_tasks_page(
+            status,  # type: ignore[arg-type]
+            project_id=project_id,
+            workflow_id=workflow_id,
+            q=q,
+            limit=limit,
+            offset=offset,
+        )
+        items = []
+        for task in tasks:
+            item = task.model_dump(mode="json")
+            item["current_approval_gate"] = self.task_store.get_current_approval_gate(task.id)
+            items.append(item)
+        return {"items": items, "total": total, "limit": limit, "offset": offset}
+
     def list_artifacts(self, task_id: str):
         return self.task_store.list_artifacts(task_id)
 
@@ -150,6 +176,20 @@ class Orchestrator:
         if artifact is None:
             raise KeyError(f"Artifact not found: {kind}")
         return self.artifact_store.read_text(artifact)
+
+    def read_artifact_by_id(self, task_id: str, artifact_id: str) -> dict[str, Any]:
+        self.task_store.get_task(task_id)
+        artifact = self.task_store.get_artifact_by_id(task_id, artifact_id)
+        if artifact is None:
+            raise KeyError(f"Artifact not found: {artifact_id}")
+        return {"artifact": artifact.model_dump(mode="json"), "content": self.artifact_store.read_text(artifact)}
+
+    def cancel_task(self, task_id: str, request: CancelTaskRequest) -> Task:
+        task = self.task_store.get_task(task_id)
+        cancelled = self.task_store.cancel_task(task_id, request.comment)
+        self._add_event(cancelled, "task_cancelled", {"comment": request.comment})
+        self._write_index(self.task_store.get_task(task.id), "Task was cancelled.")
+        return self.task_store.get_task(task_id)
 
     def decide_approval(self, task_id: str, gate: str, request: ApprovalDecisionRequest) -> Task:
         task = self.task_store.get_task(task_id)
@@ -1420,7 +1460,15 @@ This approval does not allow:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="engineering_orchestrator", version="0.1.0")
-    orchestrator = Orchestrator(settings or load_settings())
+    resolved_settings = settings or load_settings()
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(resolved_settings.cors_origins),
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    orchestrator = Orchestrator(resolved_settings)
     app.state.orchestrator = orchestrator
     register_ui_routes(app, orchestrator)
 
@@ -1433,8 +1481,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return orchestrator.create_task(request)
 
     @app.get("/tasks")
-    def list_tasks(status: str | None = None, project_id: str | None = None, limit: int = 100):
-        return orchestrator.list_tasks(status, project_id, limit)
+    def list_tasks(
+        status: str | None = None,
+        project_id: str | None = None,
+        workflow_id: str | None = None,
+        q: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        return orchestrator.list_tasks_page(status, project_id, workflow_id, q, limit, offset)
 
     @app.get("/tasks/{task_id}")
     def get_task(task_id: str):
@@ -1451,6 +1506,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @app.get("/tasks/{task_id}/artifacts/by-id/{artifact_id}")
+    def read_artifact_by_id(task_id: str, artifact_id: str):
+        try:
+            return orchestrator.read_artifact_by_id(task_id, artifact_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.get("/tasks/{task_id}/artifacts/{kind}")
     def read_artifact(task_id: str, kind: str, version: int | None = None):
         try:
@@ -1458,17 +1520,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @app.post("/tasks/{task_id}/cancel")
+    def cancel_task(task_id: str, request: CancelTaskRequest):
+        try:
+            return orchestrator.cancel_task(task_id, request)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     @app.get("/tasks/{task_id}/approvals")
     def list_approvals(task_id: str):
         try:
-            return orchestrator.list_approvals(task_id)
+            return {"items": orchestrator.list_approvals(task_id)}
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/tasks/{task_id}/events")
     def list_events(task_id: str):
         try:
-            return orchestrator.list_events(task_id)
+            return {"items": orchestrator.list_events(task_id)}
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

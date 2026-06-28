@@ -1,0 +1,18 @@
+interface StatusBadgeProps {
+  status?: string | null;
+}
+
+export function StatusBadge({ status }: StatusBadgeProps) {
+  const value = status || "unknown";
+  return <span className={`status-badge ${classNameForStatus(value)}`}>{value}</span>;
+}
+
+function classNameForStatus(status: string): string {
+  if (status.startsWith("awaiting_")) return "status-badge--awaiting";
+  if (["executing", "validating", "reviewing", "committing", "routing", "planning"].includes(status)) return "status-badge--active";
+  if (status === "closed") return "status-badge--closed";
+  if (status === "failed" || status === "validation_failed") return "status-badge--failed";
+  if (status === "cancelled") return "status-badge--cancelled";
+  if (status === "changes_requested" || status === "plan_rejected") return "status-badge--changes";
+  return "status-badge--neutral";
+}

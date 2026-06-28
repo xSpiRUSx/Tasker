@@ -72,15 +72,30 @@ def test_unified_tasks_endpoint_uses_router_decision(tmp_path):
 
     list_response = client.get("/tasks", params={"status": "awaiting_plan_approval"})
     assert list_response.status_code == 200
-    assert [task["id"] for task in list_response.json()] == [payload["task_id"]]
+    task_list = list_response.json()
+    assert task_list["total"] == 1
+    assert task_list["items"][0]["current_approval_gate"] == "plan"
+    assert [task["id"] for task in task_list["items"]] == [payload["task_id"]]
+
+    project_list_response = client.get("/tasks", params={"project_id": "solvix_zn", "q": payload["task_id"]})
+    assert project_list_response.status_code == 200
+    assert [task["id"] for task in project_list_response.json()["items"]] == [payload["task_id"]]
 
     approvals_response = client.get(f"/tasks/{payload['task_id']}/approvals")
     assert approvals_response.status_code == 200
-    assert approvals_response.json()[0]["gate"] == "plan"
+    assert approvals_response.json()["items"][0]["gate"] == "plan"
 
     events_response = client.get(f"/tasks/{payload['task_id']}/events")
     assert events_response.status_code == 200
-    assert [event["event_type"] for event in events_response.json()]
+    assert [event["event_type"] for event in events_response.json()["items"]]
+
+    artifacts_response = client.get(f"/tasks/{payload['task_id']}/artifacts")
+    assert artifacts_response.status_code == 200
+    artifact_id = next(artifact["id"] for artifact in artifacts_response.json() if artifact["kind"] == "task_index")
+    artifact_response = client.get(f"/tasks/{payload['task_id']}/artifacts/by-id/{artifact_id}")
+    assert artifact_response.status_code == 200
+    assert artifact_response.json()["artifact"]["id"] == artifact_id
+    assert payload["task_id"] in artifact_response.json()["content"]
 
     context_response = client.get(f"/tasks/{payload['task_id']}/context")
     assert context_response.status_code == 200
@@ -97,6 +112,35 @@ def test_unified_tasks_endpoint_uses_router_decision(tmp_path):
     steps_response = client.get(f"/runs/{runs[0]['id']}/steps")
     assert steps_response.status_code == 200
     assert [step["step_type"] for step in steps_response.json()] == ["execute", "validate", "observe", "evaluate"]
+
+
+def test_unified_task_cancel_and_cors(tmp_path):
+    client = TestClient(create_app(make_settings(tmp_path)))
+    response = client.post(
+        "/tasks",
+        json={
+            "message": "Solvix_ZN: напиши простую обработку привет мир",
+            "source": "test",
+        },
+    )
+    assert response.status_code == 200
+    task_id = response.json()["task_id"]
+
+    cancel_response = client.post(f"/tasks/{task_id}/cancel", json={"comment": "Cancelled by test"})
+    assert cancel_response.status_code == 200
+    assert cancel_response.json()["status"] == "cancelled"
+
+    approvals_response = client.get(f"/tasks/{task_id}/approvals")
+    assert approvals_response.status_code == 200
+    assert approvals_response.json()["items"][0]["status"] == "cancelled"
+
+    events_response = client.get(f"/tasks/{task_id}/events")
+    assert events_response.status_code == 200
+    assert "task_cancelled" in [event["event_type"] for event in events_response.json()["items"]]
+
+    cors_response = client.get("/health", headers={"Origin": "http://127.0.0.1:5173"})
+    assert cors_response.status_code == 200
+    assert cors_response.headers["access-control-allow-origin"] == "http://127.0.0.1:5173"
 
 
 def test_unified_ui_tasks_smoke(tmp_path):

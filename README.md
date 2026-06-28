@@ -109,6 +109,39 @@ Open the configured artifact root in Obsidian as a vault or folder. Each task
 gets its own Markdown folder with the route, context, working memory, plan,
 validation, evaluation, review, diff, and final report artifacts.
 
+## Web UI
+
+Start backend:
+
+```powershell
+uvicorn engineering_assistant.api:app --host 127.0.0.1 --port 8000 --reload
+```
+
+Start frontend:
+
+```powershell
+cd web
+npm install
+npm run dev
+```
+
+Open:
+
+```text
+http://127.0.0.1:5173
+```
+
+Quick workflow:
+
+```text
+1. Create task.
+2. Open generated artifacts in UI or Obsidian.
+3. Approve/reject plan.
+4. Review diff/validation artifacts.
+5. Approve/reject diff.
+6. Approve commit if required.
+```
+
 ## Configuration
 
 The unified app uses YAML files under the root `config` directory:

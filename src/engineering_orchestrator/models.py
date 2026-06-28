@@ -213,3 +213,7 @@ class ApprovalDecisionRequest(BaseModel):
 
 class ContinueTaskRequest(BaseModel):
     message: str
+
+
+class CancelTaskRequest(BaseModel):
+    comment: str | None = None

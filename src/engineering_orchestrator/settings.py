@@ -53,6 +53,7 @@ class Settings:
     loop_repair_on_validation_failure: bool = True
     loop_require_human_on_blocked_path: bool = True
     loop_require_human_on_config_change: bool = True
+    cors_origins: tuple[str, ...] = ("http://127.0.0.1:5173", "http://localhost:5173")
 
 
 def load_settings(config_path: str | Path | None = None) -> Settings:
@@ -74,6 +75,7 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
     validation = data.get("validation", {})
     approvals = data.get("approvals", {})
     loop = data.get("loop", {})
+    web = data.get("web", {})
 
     sqlite_path = os.getenv("ORCHESTRATOR_SQLITE_PATH", storage.get("sqlite_path", "./data/orchestrator.sqlite3"))
     artifacts_root = os.getenv("ORCHESTRATOR_ARTIFACTS_ROOT", artifacts.get("root_path", "./data/obsidian-tasks"))
@@ -83,6 +85,12 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
     planner_model = os.getenv("ORCHESTRATOR_PLANNER_MODEL", planning.get("model"))
     default_executor = os.getenv("ORCHESTRATOR_DEFAULT_EXECUTOR", execution.get("default_executor", "mock"))
     codex_model = os.getenv("ORCHESTRATOR_CODEX_MODEL", execution.get("codex_model"))
+    cors_origins_raw = os.getenv("TASKER_CORS_ORIGINS")
+    cors_origins = (
+        [origin.strip() for origin in cors_origins_raw.split(",") if origin.strip()]
+        if cors_origins_raw
+        else list(web.get("cors_origins") or ["http://127.0.0.1:5173", "http://localhost:5173"])
+    )
 
     return Settings(
         task_id_prefix=str(orchestrator.get("task_id_prefix", "ENG")),
@@ -113,4 +121,5 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
         loop_repair_on_validation_failure=bool(loop.get("repair_on_validation_failure", True)),
         loop_require_human_on_blocked_path=bool(loop.get("require_human_on_blocked_path", True)),
         loop_require_human_on_config_change=bool(loop.get("require_human_on_config_change", True)),
+        cors_origins=tuple(str(origin) for origin in cors_origins),
     )

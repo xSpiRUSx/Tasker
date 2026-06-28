@@ -198,9 +198,25 @@ class TaskStore:
         self,
         status: TaskStatus | None = None,
         project_id: str | None = None,
+        workflow_id: str | None = None,
+        q: str | None = None,
         limit: int = 100,
+        offset: int = 0,
     ) -> list[Task]:
+        tasks, _total = self.list_tasks_page(status, project_id, workflow_id, q, limit, offset)
+        return tasks
+
+    def list_tasks_page(
+        self,
+        status: TaskStatus | None = None,
+        project_id: str | None = None,
+        workflow_id: str | None = None,
+        q: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[Task], int]:
         sql = "SELECT * FROM tasks"
+        count_sql = "SELECT COUNT(*) AS count FROM tasks"
         params: list[Any] = []
         clauses: list[str] = []
         if status is not None:
@@ -209,15 +225,29 @@ class TaskStore:
         if project_id is not None:
             clauses.append("project_id = ?")
             params.append(project_id)
+        if workflow_id is not None:
+            clauses.append("workflow_id = ?")
+            params.append(workflow_id)
+        if q:
+            clauses.append("(id LIKE ? OR user_message LIKE ? OR artifacts_dir LIKE ?)")
+            pattern = f"%{q}%"
+            params.extend([pattern, pattern, pattern])
         if clauses:
-            sql += " WHERE " + " AND ".join(clauses)
+            where = " WHERE " + " AND ".join(clauses)
+            sql += where
+            count_sql += where
         sql += " ORDER BY updated_at DESC, id DESC"
+        limit = max(1, min(limit, 500))
+        offset = max(0, offset)
         if limit > 0:
-            sql += " LIMIT ?"
-            params.append(limit)
+            sql += " LIMIT ? OFFSET ?"
+            page_params = [*params, limit, offset]
+        else:
+            page_params = params
         with self.connect() as conn:
-            rows = conn.execute(sql, params).fetchall()
-        return [self._row_to_task(row) for row in rows]
+            rows = conn.execute(sql, page_params).fetchall()
+            total_row = conn.execute(count_sql, params).fetchone()
+        return [self._row_to_task(row) for row in rows], int(total_row["count"])
 
     def update_task(self, task: Task) -> None:
         task.updated_at = utc_now()
@@ -329,6 +359,14 @@ class TaskStore:
             row = conn.execute(sql, params).fetchone()
         return self._row_to_artifact(row) if row else None
 
+    def get_artifact_by_id(self, task_id: str, artifact_id: str) -> TaskArtifact | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM artifacts WHERE task_id = ? AND id = ?",
+                (task_id, artifact_id),
+            ).fetchone()
+        return self._row_to_artifact(row) if row else None
+
     def create_approval(
         self,
         task_id: str,
@@ -402,6 +440,40 @@ class TaskStore:
                 (task_id,),
             ).fetchall()
         return [self._row_to_approval(row) for row in rows]
+
+    def get_current_approval_gate(self, task_id: str) -> str | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT gate FROM approvals
+                WHERE task_id = ? AND status = 'pending'
+                ORDER BY created_at, id
+                LIMIT 1
+                """,
+                (task_id,),
+            ).fetchone()
+        return str(row["gate"]) if row else None
+
+    def cancel_task(self, task_id: str, comment: str | None = None) -> Task:
+        task = self.get_task(task_id)
+        if task.status in {"closed", "cancelled"}:
+            raise ValueError(f"Task cannot be cancelled from status: {task.status}")
+
+        task.status = "cancelled"
+        task.closed_at = utc_now()
+        self.update_task(task)
+
+        now = utc_now().isoformat()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE approvals
+                SET status = 'cancelled', user_comment = COALESCE(?, user_comment), resolved_at = ?
+                WHERE task_id = ? AND status = 'pending'
+                """,
+                (comment, now, task_id),
+            )
+        return self.get_task(task_id)
 
     def add_event(self, task_id: str, event_type: str, payload: dict[str, Any] | None = None) -> TaskEvent:
         event = TaskEvent(id=new_id("event"), task_id=task_id, event_type=event_type, payload=payload or {}, created_at=utc_now())

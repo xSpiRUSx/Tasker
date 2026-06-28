@@ -63,3 +63,8 @@ approvals:
   require_plan_approval: true
   require_diff_approval: true
   require_commit_approval: true
+
+web:
+  cors_origins:
+    - "http://127.0.0.1:5173"
+    - "http://localhost:5173"

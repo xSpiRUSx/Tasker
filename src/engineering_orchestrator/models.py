@@ -50,6 +50,12 @@ ArtifactKind = Literal[
     "context_summary",
     "working_memory",
     "working_memory_json",
+    "model_decisions",
+    "model_decisions_json",
+    "prompt_manifest",
+    "tool_health_report",
+    "context_compact",
+    "context_compact_json",
     "answer",
     "spec",
     "todo",
@@ -151,6 +157,8 @@ class TaskJob(BaseModel):
     task_id: str
     action: str
     status: Literal["queued", "running", "succeeded", "failed", "cancelled"]
+    input: dict[str, Any] = Field(default_factory=dict)
+    result: dict[str, Any] | None = None
     error: str | None = None
     created_at: datetime
     started_at: datetime | None = None
@@ -296,3 +304,32 @@ class ContinueTaskRequest(BaseModel):
 
 class CancelTaskRequest(BaseModel):
     comment: str | None = None
+
+
+class ModelDecisionRecord(BaseModel):
+    id: str
+    task_id: str | None = None
+    run_id: str | None = None
+    operation: str
+    profile: str
+    selected_target: str
+    runtime: str
+    model: str
+    reasoning_effort: str | None = None
+    reason: str
+    estimated_prompt_chars: int = 0
+    max_prompt_chars: int = 0
+    created_at: datetime
+
+
+class PromptBuildRecord(BaseModel):
+    id: str
+    task_id: str | None = None
+    run_id: str | None = None
+    operation: str
+    total_chars: int
+    budget_chars: int
+    included: list[dict[str, Any]] = Field(default_factory=list)
+    excluded: list[dict[str, Any]] = Field(default_factory=list)
+    status: str
+    created_at: datetime

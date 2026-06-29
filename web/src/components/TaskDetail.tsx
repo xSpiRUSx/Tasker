@@ -1,9 +1,13 @@
 import { useState } from "react";
 import type { Approval, Task } from "../api/types";
+import { ActionPanel } from "./ActionPanel";
 import { ApprovalPanel } from "./ApprovalPanel";
 import { ApprovalsPanel } from "./ApprovalsPanel";
 import { CorrectionPanel } from "./CorrectionPanel";
 import { EventsPanel } from "./EventsPanel";
+import { JobsPanel } from "./JobsPanel";
+import { ModelPolicyPanel } from "./ModelPolicyPanel";
+import { PromptReportPanel } from "./PromptReportPanel";
 import { RunsPanel } from "./RunsPanel";
 import { StatusBadge } from "./StatusBadge";
 import { TaskArtifacts } from "./TaskArtifacts";
@@ -77,6 +81,13 @@ export function TaskDetail({ approvals, busy, onCancel, onCorrection, onRefresh,
             <pre className="json-block">{JSON.stringify(selectedTask.route_decision || {}, null, 2)}</pre>
           </div>
           <div className="action-stack">
+            <ActionPanel
+              busy={busy}
+              onRefresh={onRefresh}
+              setError={setError}
+              setToast={setToast}
+              task={selectedTask}
+            />
             <ApprovalPanel
               approvals={approvals}
               busy={busy}
@@ -86,6 +97,9 @@ export function TaskDetail({ approvals, busy, onCancel, onCorrection, onRefresh,
               taskId={selectedTask.id}
             />
             <CorrectionPanel busy={busy} onCorrection={onCorrection} task={selectedTask} />
+            <JobsPanel setError={setError} taskId={selectedTask.id} />
+            <ModelPolicyPanel setError={setError} taskId={selectedTask.id} />
+            <PromptReportPanel setError={setError} taskId={selectedTask.id} />
           </div>
         </section>
       ) : null}

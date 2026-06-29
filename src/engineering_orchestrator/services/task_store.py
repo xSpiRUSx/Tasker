@@ -14,6 +14,8 @@ from engineering_orchestrator.models import (
     ApprovalStatus,
     CorrectionRequest,
     EvaluationResult,
+    ModelDecisionRecord,
+    PromptBuildRecord,
     Task,
     TaskArtifact,
     TaskEvent,
@@ -119,11 +121,70 @@ class TaskStore:
                   task_id TEXT NOT NULL,
                   action TEXT NOT NULL,
                   status TEXT NOT NULL,
+                  input_json TEXT,
+                  result_json TEXT,
                   error TEXT,
                   created_at TEXT NOT NULL,
                   started_at TEXT,
                   finished_at TEXT,
                   FOREIGN KEY(task_id) REFERENCES tasks(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS model_decisions (
+                  id TEXT PRIMARY KEY,
+                  task_id TEXT,
+                  run_id TEXT,
+                  operation TEXT NOT NULL,
+                  profile TEXT NOT NULL,
+                  selected_target TEXT NOT NULL,
+                  runtime TEXT NOT NULL,
+                  model TEXT NOT NULL,
+                  reasoning_effort TEXT,
+                  reason TEXT,
+                  estimated_prompt_chars INTEGER,
+                  max_prompt_chars INTEGER,
+                  created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS model_calls (
+                  id TEXT PRIMARY KEY,
+                  task_id TEXT,
+                  run_id TEXT,
+                  operation TEXT NOT NULL,
+                  runtime TEXT NOT NULL,
+                  provider TEXT,
+                  model TEXT NOT NULL,
+                  reasoning_effort TEXT,
+                  prompt_chars INTEGER,
+                  prompt_tokens INTEGER,
+                  completion_tokens INTEGER,
+                  cost_usd REAL,
+                  latency_ms INTEGER,
+                  status TEXT,
+                  error TEXT,
+                  created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS prompt_builds (
+                  id TEXT PRIMARY KEY,
+                  task_id TEXT,
+                  run_id TEXT,
+                  operation TEXT NOT NULL,
+                  total_chars INTEGER NOT NULL,
+                  budget_chars INTEGER NOT NULL,
+                  included_json TEXT NOT NULL,
+                  excluded_json TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS artifact_summaries (
+                  id TEXT PRIMARY KEY,
+                  artifact_id TEXT NOT NULL,
+                  content_hash TEXT NOT NULL,
+                  summary TEXT NOT NULL,
+                  model_target TEXT,
+                  created_at TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS agent_runs (
@@ -189,6 +250,8 @@ class TaskStore:
                 """
             )
             self._ensure_column(conn, "agent_runs", "correction_request_id", "TEXT")
+            self._ensure_column(conn, "jobs", "input_json", "TEXT")
+            self._ensure_column(conn, "jobs", "result_json", "TEXT")
 
     def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
         columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -623,25 +686,28 @@ class TaskStore:
             )
         return event
 
-    def create_job(self, task_id: str, action: str) -> TaskJob:
+    def create_job(self, task_id: str, action: str, input: dict[str, Any] | None = None) -> TaskJob:
         job = TaskJob(
             id=new_id("job"),
             task_id=task_id,
             action=action,
             status="queued",
+            input=input or {},
             created_at=utc_now(),
         )
         with self.connect() as conn:
             conn.execute(
                 """
-                INSERT INTO jobs (id, task_id, action, status, error, created_at, started_at, finished_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO jobs (id, task_id, action, status, input_json, result_json, error, created_at, started_at, finished_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job.id,
                     job.task_id,
                     job.action,
                     job.status,
+                    _json(job.input),
+                    _json(job.result) if job.result is not None else None,
                     job.error,
                     job.created_at.isoformat(),
                     None,
@@ -659,12 +725,25 @@ class TaskStore:
             )
         return self.get_job(job_id)
 
-    def finish_job(self, job_id: str, status: str, error: str | None = None) -> TaskJob:
+    def finish_job(self, job_id: str, status: str, error: str | None = None, result: dict[str, Any] | None = None) -> TaskJob:
         finished_at = utc_now()
         with self.connect() as conn:
             conn.execute(
-                "UPDATE jobs SET status = ?, error = ?, finished_at = ? WHERE id = ?",
-                (status, error, finished_at.isoformat(), job_id),
+                "UPDATE jobs SET status = ?, result_json = ?, error = ?, finished_at = ? WHERE id = ?",
+                (status, _json(result) if result is not None else None, error, finished_at.isoformat(), job_id),
+            )
+        return self.get_job(job_id)
+
+    def cancel_job(self, job_id: str) -> TaskJob:
+        finished_at = utc_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE jobs
+                SET status = 'cancelled', finished_at = COALESCE(finished_at, ?)
+                WHERE id = ? AND status IN ('queued', 'running')
+                """,
+                (finished_at.isoformat(), job_id),
             )
         return self.get_job(job_id)
 
@@ -682,6 +761,123 @@ class TaskStore:
                 (task_id,),
             ).fetchall()
         return [self._row_to_job(row) for row in rows]
+
+    def add_model_decision(
+        self,
+        task_id: str | None,
+        run_id: str | None,
+        operation: str,
+        profile: str,
+        selected_target: str,
+        runtime: str,
+        model: str,
+        reasoning_effort: str | None,
+        reason: str,
+        estimated_prompt_chars: int,
+        max_prompt_chars: int,
+    ) -> ModelDecisionRecord:
+        record = ModelDecisionRecord(
+            id=new_id("model-decision"),
+            task_id=task_id,
+            run_id=run_id,
+            operation=operation,
+            profile=profile,
+            selected_target=selected_target,
+            runtime=runtime,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            reason=reason,
+            estimated_prompt_chars=estimated_prompt_chars,
+            max_prompt_chars=max_prompt_chars,
+            created_at=utc_now(),
+        )
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO model_decisions (
+                  id, task_id, run_id, operation, profile, selected_target, runtime,
+                  model, reasoning_effort, reason, estimated_prompt_chars, max_prompt_chars, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.id,
+                    record.task_id,
+                    record.run_id,
+                    record.operation,
+                    record.profile,
+                    record.selected_target,
+                    record.runtime,
+                    record.model,
+                    record.reasoning_effort,
+                    record.reason,
+                    record.estimated_prompt_chars,
+                    record.max_prompt_chars,
+                    record.created_at.isoformat(),
+                ),
+            )
+        return record
+
+    def list_model_decisions(self, task_id: str) -> list[ModelDecisionRecord]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM model_decisions WHERE task_id = ? ORDER BY created_at, id",
+                (task_id,),
+            ).fetchall()
+        return [self._row_to_model_decision(row) for row in rows]
+
+    def add_prompt_build(
+        self,
+        task_id: str | None,
+        run_id: str | None,
+        operation: str,
+        total_chars: int,
+        budget_chars: int,
+        included: list[dict[str, Any]],
+        excluded: list[dict[str, Any]],
+        status: str,
+    ) -> PromptBuildRecord:
+        record = PromptBuildRecord(
+            id=new_id("prompt-build"),
+            task_id=task_id,
+            run_id=run_id,
+            operation=operation,
+            total_chars=total_chars,
+            budget_chars=budget_chars,
+            included=included,
+            excluded=excluded,
+            status=status,
+            created_at=utc_now(),
+        )
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO prompt_builds (
+                  id, task_id, run_id, operation, total_chars, budget_chars,
+                  included_json, excluded_json, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.id,
+                    record.task_id,
+                    record.run_id,
+                    record.operation,
+                    record.total_chars,
+                    record.budget_chars,
+                    _json(record.included),
+                    _json(record.excluded),
+                    record.status,
+                    record.created_at.isoformat(),
+                ),
+            )
+        return record
+
+    def list_prompt_builds(self, task_id: str) -> list[PromptBuildRecord]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM prompt_builds WHERE task_id = ? ORDER BY created_at, id",
+                (task_id,),
+            ).fetchall()
+        return [self._row_to_prompt_build(row) for row in rows]
 
     def list_events(self, task_id: str) -> list[TaskEvent]:
         with self.connect() as conn:
@@ -1003,10 +1199,43 @@ class TaskStore:
             task_id=row["task_id"],
             action=row["action"],
             status=row["status"],
+            input=json.loads(row["input_json"]) if "input_json" in row.keys() and row["input_json"] else {},
+            result=json.loads(row["result_json"]) if "result_json" in row.keys() and row["result_json"] else None,
             error=row["error"],
             created_at=_dt(row["created_at"]),
             started_at=_dt(row["started_at"]),
             finished_at=_dt(row["finished_at"]),
+        )
+
+    def _row_to_model_decision(self, row: sqlite3.Row) -> ModelDecisionRecord:
+        return ModelDecisionRecord(
+            id=row["id"],
+            task_id=row["task_id"],
+            run_id=row["run_id"],
+            operation=row["operation"],
+            profile=row["profile"],
+            selected_target=row["selected_target"],
+            runtime=row["runtime"],
+            model=row["model"],
+            reasoning_effort=row["reasoning_effort"],
+            reason=row["reason"] or "",
+            estimated_prompt_chars=row["estimated_prompt_chars"] or 0,
+            max_prompt_chars=row["max_prompt_chars"] or 0,
+            created_at=_dt(row["created_at"]),
+        )
+
+    def _row_to_prompt_build(self, row: sqlite3.Row) -> PromptBuildRecord:
+        return PromptBuildRecord(
+            id=row["id"],
+            task_id=row["task_id"],
+            run_id=row["run_id"],
+            operation=row["operation"],
+            total_chars=row["total_chars"],
+            budget_chars=row["budget_chars"],
+            included=json.loads(row["included_json"]),
+            excluded=json.loads(row["excluded_json"]),
+            status=row["status"],
+            created_at=_dt(row["created_at"]),
         )
 
     def _row_to_run(self, row: sqlite3.Row) -> AgentRun:

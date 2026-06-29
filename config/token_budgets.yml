@@ -1,0 +1,49 @@
+global:
+  max_prompt_chars: 300000
+  max_single_artifact_chars: 40000
+  max_runtime_log_chars_in_prompt: 0
+  max_events_in_prompt: 20
+  max_diff_chars_in_prompt: 60000
+
+operation_budgets:
+  route_task:
+    max_prompt_chars: 20000
+    include_artifacts: false
+    include_events: false
+
+  create_simple_plan:
+    max_prompt_chars: 120000
+    include_runtime_logs: false
+    include_full_diff: false
+
+  create_complex_spec:
+    max_prompt_chars: 250000
+    include_runtime_logs: false
+    include_relevant_docs: true
+
+  execute_code:
+    max_prompt_chars: 300000
+    include_runtime_logs: false
+    include_events: false
+    include_only_latest_versions: true
+
+  execute_micro_correction:
+    max_prompt_chars: 120000
+    include_runtime_logs: false
+    include_events: false
+    include_full_history: false
+    include_compact_diff_summary: true
+
+  review_diff:
+    max_prompt_chars: 160000
+    include_full_diff_when_under_chars: 60000
+    otherwise_use_diff_summary: true
+
+forbidden_prompt_artifacts:
+  - events.md
+  - 07-executor-prompt.md
+  - 07-executor-stdout.md
+  - 07-executor-stderr.md
+  - 07-run.json
+  - traces/*.jsonl
+  - runtime/*

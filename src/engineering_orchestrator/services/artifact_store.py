@@ -18,6 +18,12 @@ FILENAME_BY_KIND: dict[str, str] = {
     "context_summary": "02-context.md",
     "working_memory": "02-working-memory.md",
     "working_memory_json": "02-working-memory.json",
+    "model_decisions": "02-model-decisions.md",
+    "model_decisions_json": "02-model-decisions.json",
+    "prompt_manifest": "02-prompt-manifest.md",
+    "tool_health_report": "02-tool-health.md",
+    "context_compact": "02-context-compact.md",
+    "context_compact_json": "02-context-compact.json",
     "answer": "03-answer.md",
     "spec": "03-spec.v{version}.md",
     "todo": "04-todo.v{version}.md",
@@ -60,6 +66,12 @@ NON_VERSIONED_ARTIFACT_KINDS: set[str] = {
     "context_summary",
     "working_memory",
     "working_memory_json",
+    "model_decisions",
+    "model_decisions_json",
+    "prompt_manifest",
+    "tool_health_report",
+    "context_compact",
+    "context_compact_json",
     "answer",
     "execution_log",
     "executor_policy",
@@ -243,15 +255,20 @@ See [[events]].
         )
 
     def append_event(self, task: Task, event: TaskEvent) -> TaskArtifact:
-        existing = ""
         path = self.root_path / (task.artifacts_dir or "") / "events.md"
+        event_lines: list[str] = []
         if path.exists():
             existing = path.read_text(encoding="utf-8")
             if existing.startswith("---"):
                 parts = existing.split("---", 2)
                 existing = parts[2].lstrip() if len(parts) == 3 else existing
+            event_lines = [line for line in existing.splitlines() if line.startswith("- `")]
         line = f"- `{event.created_at.isoformat()}` **{event.event_type}** {event.payload}\n"
-        content = (existing.rstrip() + "\n" if existing else "# Events\n\n") + line
+        event_lines.append(line.rstrip())
+        omitted = max(0, len(event_lines) - 50)
+        event_lines = event_lines[-50:]
+        summary = f"_Showing latest 50 events. {omitted} older event(s) are stored in SQLite._\n\n" if omitted else ""
+        content = "# Events\n\n" + summary + "\n".join(event_lines) + "\n"
         return self.write_markdown(task, "events", "Events", content, filename="events.md")
 
     def _with_frontmatter(

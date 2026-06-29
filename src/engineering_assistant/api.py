@@ -47,6 +47,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def health():
         return {"ok": True, "app": "engineering_assistant"}
 
+    @app.get("/health/tools")
+    def tool_health():
+        return orchestrator.tool_health()
+
     @app.post("/route")
     def route_task(request: RouteRequest):
         return router.route(request.message)
@@ -118,6 +122,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @app.get("/tasks/{task_id}/corrections/{correction_id}")
+    def get_correction(task_id: str, correction_id: str):
+        try:
+            orchestrator.get_task(task_id)
+            return orchestrator.task_store.get_correction_request(task_id, correction_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.post("/tasks/{task_id}/corrections", response_model=CreateCorrectionResponse)
     def create_correction(task_id: str, request: CreateCorrectionRequest):
         try:
@@ -141,10 +153,85 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @app.get("/tasks/{task_id}/tool-health")
+    def task_tool_health(task_id: str):
+        try:
+            return orchestrator.task_tool_health(task_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/tasks/{task_id}/model-decisions")
+    def list_model_decisions(task_id: str):
+        try:
+            return {"items": orchestrator.list_model_decisions(task_id)}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/tasks/{task_id}/prompt-builds")
+    def list_prompt_builds(task_id: str):
+        try:
+            return {"items": orchestrator.list_prompt_builds(task_id)}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.post("/tasks/{task_id}/rebuild-context")
     def rebuild_context(task_id: str):
         try:
             return orchestrator.rebuild_context(task_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/tasks/{task_id}/actions/compact-context", status_code=status.HTTP_202_ACCEPTED)
+    def compact_context_action(task_id: str):
+        try:
+            orchestrator.get_task(task_id)
+            job = orchestrator.job_runner.enqueue(task_id, "compact-context", lambda: orchestrator.compact_context(task_id), input={})
+            return {"accepted": True, "job_id": job.id, "task_id": task_id, "status": job.status, "action": job.action}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/tasks/{task_id}/actions/rebuild-context", status_code=status.HTTP_202_ACCEPTED)
+    def rebuild_context_action(task_id: str):
+        try:
+            orchestrator.get_task(task_id)
+            job = orchestrator.job_runner.enqueue(task_id, "rebuild-context", lambda: orchestrator.rebuild_context(task_id), input={})
+            return {"accepted": True, "job_id": job.id, "task_id": task_id, "status": job.status, "action": job.action}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/tasks/{task_id}/actions/retry-execution", status_code=status.HTTP_202_ACCEPTED)
+    def retry_execution_action(task_id: str):
+        try:
+            orchestrator.get_task(task_id)
+            job = orchestrator.job_runner.enqueue(task_id, "retry-execution", lambda: orchestrator._run_execution(task_id), input={})
+            return {"accepted": True, "job_id": job.id, "task_id": task_id, "status": job.status, "action": job.action}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/tasks/{task_id}/actions/retry-validation", status_code=status.HTTP_202_ACCEPTED)
+    def retry_validation_action(task_id: str):
+        try:
+            orchestrator.get_task(task_id)
+            job = orchestrator.job_runner.enqueue(task_id, "retry-validation", lambda: orchestrator._run_execution(task_id), input={})
+            return {"accepted": True, "job_id": job.id, "task_id": task_id, "status": job.status, "action": job.action}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/tasks/{task_id}/actions/skip-validation-manual")
+    def skip_validation_manual_action(task_id: str):
+        try:
+            task = orchestrator.get_task(task_id)
+            task.status = "awaiting_diff_approval"
+            orchestrator.task_store.update_task(task)
+            orchestrator._add_event(task, "validation_skipped_manual", {})
+            return orchestrator.get_task_payload(task_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/tasks/{task_id}/repair-state")
+    def repair_state(task_id: str):
+        try:
+            return orchestrator.repair_state(task_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -166,6 +253,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def get_job(job_id: str):
         try:
             return orchestrator.get_job(job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/jobs/{job_id}/cancel")
+    def cancel_job(job_id: str):
+        try:
+            return orchestrator.cancel_job(job_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

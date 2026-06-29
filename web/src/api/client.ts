@@ -12,11 +12,14 @@ import type {
   JobAcceptedResponse,
   ListTasksParams,
   ListTasksResponse,
+  ModelDecision,
+  PromptBuild,
   RouteDecision,
   Task,
   TaskArtifact,
   TaskEvent,
   TaskJob,
+  ToolHealth,
 } from "./types";
 
 const API_BASE = (import.meta.env.VITE_TASKER_API_BASE || "http://127.0.0.1:8000").replace(/\/$/, "");
@@ -149,6 +152,38 @@ export function sendTaskMessage(taskId: string, message: string): Promise<JobAcc
 export async function listJobs(taskId: string): Promise<{ items: TaskJob[] }> {
   const payload = await request<{ items: TaskJob[] } | TaskJob[]>(`/tasks/${encodeURIComponent(taskId)}/jobs`);
   return Array.isArray(payload) ? { items: payload } : payload;
+}
+
+export function getJob(jobId: string): Promise<TaskJob> {
+  return request<TaskJob>(`/jobs/${encodeURIComponent(jobId)}`);
+}
+
+export function cancelJob(jobId: string): Promise<TaskJob> {
+  return request<TaskJob>(`/jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST" });
+}
+
+export async function listModelDecisions(taskId: string): Promise<{ items: ModelDecision[] }> {
+  const payload = await request<{ items: ModelDecision[] } | ModelDecision[]>(`/tasks/${encodeURIComponent(taskId)}/model-decisions`);
+  return Array.isArray(payload) ? { items: payload } : payload;
+}
+
+export async function listPromptBuilds(taskId: string): Promise<{ items: PromptBuild[] }> {
+  const payload = await request<{ items: PromptBuild[] } | PromptBuild[]>(`/tasks/${encodeURIComponent(taskId)}/prompt-builds`);
+  return Array.isArray(payload) ? { items: payload } : payload;
+}
+
+export function getTaskToolHealth(taskId: string): Promise<ToolHealth> {
+  return request<ToolHealth>(`/tasks/${encodeURIComponent(taskId)}/tool-health`);
+}
+
+export function runTaskAction(taskId: string, action: string): Promise<JobAcceptedResponse> {
+  return request<JobAcceptedResponse>(`/tasks/${encodeURIComponent(taskId)}/actions/${encodeURIComponent(action)}`, {
+    method: "POST",
+  });
+}
+
+export function repairTaskState(taskId: string): Promise<Record<string, unknown>> {
+  return request<Record<string, unknown>>(`/tasks/${encodeURIComponent(taskId)}/repair-state`, { method: "POST" });
 }
 
 export function cancelTask(taskId: string, comment?: string): Promise<Task> {

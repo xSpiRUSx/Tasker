@@ -54,6 +54,9 @@ class Settings:
     loop_require_human_on_blocked_path: bool = True
     loop_require_human_on_config_change: bool = True
     cors_origins: tuple[str, ...] = ("http://127.0.0.1:5173", "http://localhost:5173")
+    model_policy_path: Path | None = None
+    token_budgets_path: Path | None = None
+    runtime_root: Path | None = None
 
 
 def load_settings(config_path: str | Path | None = None) -> Settings:
@@ -101,6 +104,9 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
         router_provider=str(router_provider),
         projects_path=_resolve_path(base_dir, router.get("projects_path", "./config/projects.yml")),
         workflows_path=_resolve_path(base_dir, router.get("workflows_path", "./config/workflows.yml")),
+        model_policy_path=_resolve_path(base_dir, data.get("model_policy_path", "./config/model_policy.yml")),
+        token_budgets_path=_resolve_path(base_dir, data.get("token_budgets_path", "./config/token_budgets.yml")),
+        runtime_root=_resolve_path(base_dir, data.get("runtime_root", "./data/runtime")),
         planner_provider=str(planner_provider),
         planner_model=str(planner_model) if planner_model else None,
         planner_timeout_seconds=int(os.getenv("ORCHESTRATOR_PLANNER_TIMEOUT_SECONDS", planning.get("timeout_seconds", 900))),

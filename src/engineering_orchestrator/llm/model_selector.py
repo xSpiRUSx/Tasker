@@ -1,0 +1,92 @@
+from __future__ import annotations
+
+from engineering_orchestrator.llm.model_policy import ModelPolicy
+from engineering_orchestrator.llm.types import ModelDecision, ModelSelectionRequest
+from engineering_orchestrator.services.project_registry import ProjectRegistry
+
+
+OPERATION_PHASE = {
+    "create_simple_plan": "planning",
+    "create_complex_spec": "planning",
+    "create_1c_business_spec": "planning",
+    "execute_code": "execution",
+    "execute_simple_code_change": "execution",
+    "execute_complex_code_change": "execution",
+    "execute_micro_correction": "correction",
+    "review_diff": "review",
+}
+
+
+class ModelSelector:
+    def __init__(self, policy: ModelPolicy, projects: ProjectRegistry | None = None, token_budgets: dict | None = None):
+        self.policy = policy
+        self.projects = projects
+        self.token_budgets = token_budgets or {}
+
+    def select(self, request: ModelSelectionRequest) -> ModelDecision:
+        profile = self._profile(request)
+        target_id, reason = self._target_id(request, profile)
+        target = self.policy.target(target_id)
+        model = self.policy.resolve_model(str(target.get("model") or "none"))
+        max_prompt_chars = self._max_prompt_chars(request.operation)
+        reasoning_effort = target.get("reasoning_effort")
+        if reasoning_effort == "none":
+            reasoning_effort = None
+        return ModelDecision(
+            target_id=target_id,
+            runtime=str(target.get("runtime") or "mock"),
+            model=model,
+            reasoning_effort=str(reasoning_effort) if reasoning_effort else None,
+            provider_reasoning_effort=target.get("provider_reasoning_effort"),
+            profile=profile,
+            operation=request.operation,
+            reason=reason,
+            max_prompt_chars=max_prompt_chars,
+            allow_escalation=self.policy.allows_extra_high(profile),
+        )
+
+    def _profile(self, request: ModelSelectionRequest) -> str:
+        project = self.projects.get(request.project_id or "") if self.projects and request.project_id else None
+        return str((project or {}).get("default_model_profile") or self.policy.active_profile)
+
+    def _target_id(self, request: ModelSelectionRequest, profile: str) -> tuple[str, str]:
+        if request.task_override:
+            return request.task_override, "task override"
+
+        project = self.projects.get(request.project_id or "") if self.projects and request.project_id else None
+        overrides = (project or {}).get("model_overrides") or {}
+        override_key = self._project_override_key(request)
+        if override_key in overrides:
+            return str(overrides[override_key]), f"project override `{override_key}`"
+
+        phase = OPERATION_PHASE.get(request.operation)
+        workflow_target = self.policy.workflow_target(request.workflow_id, phase or "", request.correction_mode)
+        if workflow_target:
+            return workflow_target, f"workflow `{request.workflow_id}` {phase} route"
+
+        operation_target = self.policy.operation_target(request.operation)
+        if operation_target:
+            return operation_target, f"operation `{request.operation}` route"
+
+        return (
+            self.policy.profile_default(profile, request.requires_code_execution),
+            f"profile `{profile}` default",
+        )
+
+    def _project_override_key(self, request: ModelSelectionRequest) -> str:
+        if request.operation == "execute_micro_correction":
+            return "correction_micro"
+        if request.correction_mode == "minor_correction":
+            return "correction_minor"
+        if request.operation.startswith("create"):
+            return "planning"
+        if request.operation.startswith("execute"):
+            return "execution"
+        if request.operation.startswith("review"):
+            return "review"
+        return request.operation
+
+    def _max_prompt_chars(self, operation: str) -> int:
+        operation_budgets = self.token_budgets.get("operation_budgets") or {}
+        global_budget = self.token_budgets.get("global") or {}
+        return int((operation_budgets.get(operation) or {}).get("max_prompt_chars") or global_budget.get("max_prompt_chars") or 300000)

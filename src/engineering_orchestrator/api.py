@@ -5,10 +5,13 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Protocol
 
+import yaml
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from engineering_orchestrator.harness import ContextBuilder, PromptBuilder
+from engineering_orchestrator.llm import ModelPolicy, ModelSelectionRequest, ModelSelector, PromptBudgeter
+from engineering_orchestrator.llm.prompt_budgeter import PromptBudgetError
 from engineering_orchestrator.loop import Evaluator, LoopPolicy, Observer, RepairPlanner
 from engineering_orchestrator.models import (
     ApprovalDecisionRequest,
@@ -34,6 +37,7 @@ from engineering_orchestrator.services.planning_service import PlanningService
 from engineering_orchestrator.services.project_registry import ProjectRegistry
 from engineering_orchestrator.services.review_service import ReviewService
 from engineering_orchestrator.services.task_store import TaskStore, utc_now
+from engineering_orchestrator.services.tool_health import ToolHealthService
 from engineering_orchestrator.services.validation_service import ValidationService
 from engineering_orchestrator.services.workflow_registry import WorkflowRegistry
 from engineering_orchestrator.settings import Settings, load_settings
@@ -65,6 +69,18 @@ class Orchestrator:
         self.approval_service = ApprovalService(self.task_store, self.artifact_store)
         self.projects = ProjectRegistry(settings.projects_path)
         self.workflows = WorkflowRegistry(settings.workflows_path)
+        model_policy_path = self._config_path(settings.model_policy_path, "model_policy.yml")
+        token_budgets_path = self._config_path(settings.token_budgets_path, "token_budgets.yml")
+        self.token_budgets = self._load_yaml(token_budgets_path)
+        self.model_policy = ModelPolicy(model_policy_path)
+        self.model_selector = ModelSelector(self.model_policy, self.projects, self.token_budgets)
+        self.prompt_budgeter = PromptBudgeter(token_budgets_path)
+        self.tool_health_service = ToolHealthService(
+            self.projects,
+            settings.codex_bin,
+            settings.worktrees_root,
+            settings.runtime_root or settings.artifacts_root.parent / "runtime",
+        )
         self.executor_service = ExecutorService(settings, self.artifact_store.root_path)
         self.executor = self.executor_service.get(settings.default_executor)
         self.git_service = GitService()
@@ -209,6 +225,141 @@ class Orchestrator:
             else "live",
         }
 
+    def list_model_decisions(self, task_id: str):
+        self.task_store.get_task(task_id)
+        return self.task_store.list_model_decisions(task_id)
+
+    def list_prompt_builds(self, task_id: str):
+        self.task_store.get_task(task_id)
+        return self.task_store.list_prompt_builds(task_id)
+
+    def tool_health(self) -> dict[str, Any]:
+        return self.tool_health_service.global_report()
+
+    def task_tool_health(self, task_id: str) -> dict[str, Any]:
+        task = self.task_store.get_task(task_id)
+        report = self.tool_health_service.task_report(task.project_id)
+        artifact = self.artifact_store.write_markdown(task, "tool_health_report", "Tool health", self.tool_health_service.markdown(report))
+        self.task_store.add_artifact(artifact)
+        return report
+
+    def compact_context(self, task_id: str) -> dict[str, Any]:
+        task = self.task_store.get_task(task_id)
+        decision = self._record_model_decision(
+            task,
+            None,
+            ModelSelectionRequest(
+                task_id=task.id,
+                operation="compact_context",
+                workflow_id=task.workflow_id,
+                project_id=task.project_id,
+                risk_level=task.risk_level,
+            ),
+        )
+        latest_correction = self.task_store.list_correction_requests(task.id)[-1:] or []
+        changed_files: list[str] = []
+        if task.worktree_path:
+            try:
+                changed_files = self.git_service.changed_files(Path(task.worktree_path))
+            except Exception:
+                changed_files = []
+        content = f"""# Context compact
+
+## Current task goal
+
+{task.user_message}
+
+## Route
+
+- Project: `{task.project_id or "unknown"}`
+- Workflow: `{task.workflow_id or "unknown"}`
+- Risk: `{task.risk_level or "unknown"}`
+
+## Latest correction request
+
+{latest_correction[0].user_comment if latest_correction else "None."}
+
+## Current changed files
+
+{self._bullet_list(changed_files)}
+
+## Do-not-touch rules
+
+{self._bullet_list(self.projects.blocked_paths(task.project_id))}
+
+## Model decision
+
+- Target: `{decision.selected_target}`
+- Runtime: `{decision.runtime}`
+- Model: `{decision.model}`
+- Reason: {decision.reason}
+"""
+        artifact = self.artifact_store.write_markdown(task, "context_compact", "Context compact", content)
+        payload = {
+            "task_id": task.id,
+            "changed_files": changed_files,
+            "model_decision_id": decision.id,
+            "blocked_paths": self.projects.blocked_paths(task.project_id),
+        }
+        json_artifact = self.artifact_store.write_json(task, "context_compact_json", "Context compact JSON", payload)
+        self.task_store.add_artifact(artifact)
+        self.task_store.add_artifact(json_artifact)
+        self._add_event(task, "context_compacted", {"artifact_id": artifact.id, "model_decision_id": decision.id})
+        self._write_index(self.task_store.get_task(task.id), "Context was compacted and can be used for retry.")
+        return payload
+
+    def repair_state(self, task_id: str) -> dict[str, Any]:
+        task = self.task_store.get_task(task_id)
+        before = task.model_dump(mode="json")
+        findings: list[str] = []
+        if task.status.startswith("awaiting_") and self.task_store.get_current_approval_gate(task.id) is None:
+            findings.append("awaiting status has no pending approval")
+        if task.status in {"executing", "planning", "executing_correction"}:
+            active = [job for job in self.task_store.list_jobs(task.id) if job.status in {"queued", "running"}]
+            if not active:
+                findings.append("running status has no active job")
+                task.status = "changes_requested"
+        if task.status == "changes_requested" and not self.task_store.list_correction_requests(task.id):
+            findings.append("changes_requested has no correction request")
+        if task.status in {"closed", "cancelled"} and task.closed_at is None:
+            findings.append("terminal status missing closed_at")
+            task.closed_at = utc_now()
+        if task.status not in {"closed", "cancelled"} and task.closed_at is not None:
+            findings.append("non-terminal status had closed_at")
+            task.closed_at = None
+        if task.worktree_path and not Path(task.worktree_path).exists():
+            findings.append("worktree path is missing")
+            task.status = "changes_requested"
+        self.task_store.update_task(task)
+        after = self.task_store.get_task(task.id).model_dump(mode="json")
+        report = {"task_id": task.id, "findings": findings, "before": before, "after": after}
+        self._add_event(task, "task_state_repaired", {"findings": findings})
+        artifact = self.artifact_store.write_markdown(
+            self.task_store.get_task(task.id),
+            "diagnosis",
+            "Task state repair",
+            "# Task state repair\n\n```json\n" + json.dumps(report, ensure_ascii=False, indent=2) + "\n```\n",
+        )
+        self.task_store.add_artifact(artifact)
+        return report
+
+    def cancel_job(self, job_id: str):
+        return self.job_runner.cancel(job_id)
+
+    def _load_yaml(self, path: Path | None) -> dict[str, Any]:
+        if path and path.exists():
+            return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        return {}
+
+    def _config_path(self, configured: Path | None, filename: str) -> Path:
+        if configured and configured.exists():
+            return configured
+        sibling = Path(self.settings.projects_path).parent / filename
+        if sibling.exists():
+            return sibling
+        repo_config = Path(__file__).resolve().parents[2] / "config" / filename
+        return repo_config
+
     def get_run(self, run_id: str):
         return self.task_store.get_run(run_id)
 
@@ -296,6 +447,7 @@ class Orchestrator:
             task_id,
             "continue_task",
             lambda: self.continue_task(task_id, request),
+            input=request.model_dump(mode="json"),
         )
         return JobAcceptedResponse(job_id=job.id, task_id=task_id, status=job.status, action=job.action)
 
@@ -310,6 +462,7 @@ class Orchestrator:
             task_id,
             f"approval:{gate}:{request.decision}",
             lambda: self.decide_approval(task_id, gate, request),
+            input={"gate": gate, **request.model_dump(mode="json")},
         )
         return JobAcceptedResponse(job_id=job.id, task_id=task_id, status=job.status, action=job.action)
 
@@ -336,6 +489,18 @@ class Orchestrator:
         task.status = "routed" if route.workflow_id not in {None, "clarify"} else "awaiting_clarification"
         self.task_store.update_task(task)
         task = self._rename_artifact_folder_for_route(self.task_store.get_task(task.id))
+        self._record_model_decision(
+            task,
+            None,
+            ModelSelectionRequest(
+                task_id=task.id,
+                operation="route_task",
+                workflow_id=route.workflow_id,
+                project_id=route.project_id,
+                complexity=route.complexity,
+                risk_level=route.risk_level,
+            ),
+        )
 
         artifact = self.artifact_store.write_markdown(task, "route_decision", "Route decision", self._route_markdown(task, route))
         self.task_store.add_artifact(artifact)
@@ -460,6 +625,72 @@ class Orchestrator:
         self.task_store.add_artifact(json_artifact)
         return memory
 
+    def _record_model_decision(self, task: Task, run_id: str | None, request: ModelSelectionRequest):
+        decision = self.model_selector.select(request)
+        record = self.task_store.add_model_decision(
+            task.id,
+            run_id,
+            request.operation,
+            decision.profile,
+            decision.target_id,
+            decision.runtime,
+            decision.model,
+            decision.reasoning_effort,
+            decision.reason,
+            request.estimated_prompt_chars,
+            decision.max_prompt_chars,
+        )
+        self._write_model_decision_artifacts(task)
+        return record
+
+    def _write_model_decision_artifacts(self, task: Task) -> None:
+        records = self.task_store.list_model_decisions(task.id)
+        if not records:
+            return
+        lines = ["# Model decisions", ""]
+        for record in records:
+            lines.extend(
+                [
+                    f"## {record.operation}",
+                    "",
+                    f"- Selected target: `{record.selected_target}`",
+                    f"- Runtime: `{record.runtime}`",
+                    f"- Model: `{record.model}`",
+                    f"- Reasoning effort: `{record.reasoning_effort or 'none'}`",
+                    f"- Reason: {record.reason}",
+                    f"- Prompt budget chars: `{record.max_prompt_chars}`",
+                    "",
+                ]
+            )
+        md = self.artifact_store.write_markdown(task, "model_decisions", "Model decisions", "\n".join(lines))
+        js = self.artifact_store.write_json(
+            task,
+            "model_decisions_json",
+            "Model decisions JSON",
+            [record.model_dump(mode="json") for record in records],
+        )
+        self.task_store.add_artifact(md)
+        self.task_store.add_artifact(js)
+
+    def _write_prompt_manifest_artifact(self, task: Task, manifest) -> None:
+        content = f"""# Prompt manifest
+
+Operation: `{manifest.operation}`
+Status: `{manifest.status}`
+Total chars: `{manifest.total_chars}`
+Budget chars: `{manifest.budget_chars}`
+
+## Included artifacts
+
+{self._bullet_list([f"{entry.kind} v{entry.version or 'latest'}: {entry.chars} chars" for entry in manifest.included_artifacts])}
+
+## Excluded artifacts
+
+{self._bullet_list([f"{entry.kind} ({entry.reason or 'excluded'})" for entry in manifest.excluded_artifacts])}
+"""
+        artifact = self.artifact_store.write_markdown(task, "prompt_manifest", "Prompt manifest", content)
+        self.task_store.add_artifact(artifact)
+
     def _create_plan(self, task: Task, revision_comment: str | None = None):
         task.status = "planning"
         self.task_store.update_task(task)
@@ -468,6 +699,22 @@ class Orchestrator:
         context_markdown = self.artifact_store.read_text(context_artifact) if context_artifact else ""
         if revision_comment:
             context_markdown = context_markdown.rstrip() + f"\n\n## Latest correction request\n\n{revision_comment}\n"
+        operation = "create_1c_business_spec" if self.projects.validation_profile(task.project_id) == "1c" else (
+            "create_complex_spec" if route.requires_spec or task.risk_level == "high" else "create_simple_plan"
+        )
+        self._record_model_decision(
+            task,
+            None,
+            ModelSelectionRequest(
+                task_id=task.id,
+                operation=operation,
+                workflow_id=task.workflow_id,
+                project_id=task.project_id,
+                complexity=route.complexity,
+                risk_level=task.risk_level,
+                estimated_prompt_chars=len(context_markdown),
+            ),
+        )
         draft = self.planning_service.write_plan(task, route, context_markdown)
         artifacts = []
         version = self._next_plan_version(task.id)
@@ -560,6 +807,18 @@ class Orchestrator:
 
         task.status = "classifying_correction"
         self.task_store.update_task(task)
+        self._record_model_decision(
+            task,
+            None,
+            ModelSelectionRequest(
+                task_id=task.id,
+                operation="classify_correction",
+                workflow_id=task.workflow_id,
+                project_id=task.project_id,
+                risk_level=task.risk_level,
+                estimated_prompt_chars=len(comment),
+            ),
+        )
         classifier_result = self.correction_classifier.classify(
             CorrectionClassifierInput(
                 comment=comment,
@@ -902,13 +1161,41 @@ Awaiting updated diff approval.
     def _run_execution(self, task_id: str, correction: CorrectionRequest | None = None) -> Task:
         task = self.task_store.get_task(task_id)
         is_correction = correction is not None
+        operation = "execute_micro_correction" if is_correction and correction.mode == "micro_correction" else (
+            "execute_complex_code_change" if task.risk_level == "high" else "execute_simple_code_change"
+        )
+        decision = self.model_selector.select(
+            ModelSelectionRequest(
+                task_id=task.id,
+                operation=operation,
+                workflow_id=task.workflow_id,
+                project_id=task.project_id,
+                risk_level=task.risk_level,
+                correction_mode=correction.mode if correction else None,
+                requires_code_execution=True,
+            )
+        )
         run = self.task_store.create_run(
             task.id,
             "correction" if is_correction else "execution",
             executor=self.settings.default_executor,
-            model=self.settings.codex_model if self.settings.default_executor == "codex" else None,
+            model=decision.model if self.settings.default_executor == "codex" else None,
             correction_request_id=correction.id if correction else None,
         )
+        self.task_store.add_model_decision(
+            task.id,
+            run.id,
+            operation,
+            decision.profile,
+            decision.target_id,
+            decision.runtime,
+            decision.model,
+            decision.reasoning_effort,
+            decision.reason,
+            0,
+            decision.max_prompt_chars,
+        )
+        self._write_model_decision_artifacts(task)
         if is_correction:
             task.status = "executing_correction"
             self.task_store.update_task(task)
@@ -929,6 +1216,33 @@ Awaiting updated diff approval.
         execution_artifacts = (
             self._correction_execution_artifacts(task, correction) if is_correction else self.task_store.list_artifacts(task.id)
         )
+        prompt_operation = "execute_micro_correction" if is_correction else "execute_code"
+        manifest = self.prompt_budgeter.build_manifest(
+            prompt_operation,
+            execution_artifacts,
+            self.artifact_store.root_path,
+            base_prompt_chars=len(task.user_message),
+        )
+        self.task_store.add_prompt_build(
+            task.id,
+            run.id,
+            manifest.operation,
+            manifest.total_chars,
+            manifest.budget_chars,
+            [entry.model_dump(mode="json") for entry in manifest.included_artifacts],
+            [entry.model_dump(mode="json") for entry in manifest.excluded_artifacts],
+            manifest.status,
+        )
+        self._write_prompt_manifest_artifact(task, manifest)
+        try:
+            self.prompt_budgeter.ensure_within_budget(manifest)
+        except PromptBudgetError as exc:
+            task.status = "prompt_too_large"
+            self.task_store.update_task(task)
+            self.task_store.finish_run(run.id, "failed", iteration_count=0, stop_reason="prompt_too_large")
+            self._add_event(task, "prompt_too_large", {"error": str(exc), "run_id": run.id})
+            self._write_index(self.task_store.get_task(task.id), "Prompt is too large. Compact context and retry.")
+            return self.task_store.get_task(task.id)
         result = self.executor.execute(task, execution_artifacts)
         execution = self.artifact_store.write_markdown(
             task,
@@ -1320,14 +1634,7 @@ Status: `{result.status}`
 
     def _write_executor_result_artifacts(self, task: Task, result, run_id: str) -> None:
         if result.prompt:
-            self.task_store.add_artifact(
-                self.artifact_store.write_markdown(
-                    task,
-                    "executor_prompt",
-                    "Executor prompt",
-                    self._runtime_artifact_markdown(task, run_id, "prompt.txt", result.prompt),
-                )
-            )
+            self._write_runtime_file(task, run_id, "executor-prompt.txt", result.prompt)
         if result.command:
             command_text = " ".join(result.command)
             self.task_store.add_artifact(
@@ -1339,46 +1646,20 @@ Status: `{result.status}`
                 )
             )
         if result.stdout or self.settings.default_executor == "codex":
-            self.task_store.add_artifact(
-                self.artifact_store.write_markdown(
-                    task,
-                    "executor_stdout",
-                    "Executor stdout",
-                    self._runtime_artifact_markdown(task, run_id, "stdout.txt", result.stdout),
-                )
-            )
+            self._write_runtime_file(task, run_id, "executor-stdout.log", result.stdout)
         if result.stderr or self.settings.default_executor == "codex":
-            self.task_store.add_artifact(
-                self.artifact_store.write_markdown(
-                    task,
-                    "executor_stderr",
-                    "Executor stderr",
-                    self._runtime_artifact_markdown(task, run_id, "stderr.txt", result.stderr),
-                )
-            )
+            self._write_runtime_file(task, run_id, "executor-stderr.log", result.stderr)
 
-    def _runtime_artifact_markdown(self, task: Task, run_id: str, filename: str, content: str) -> str:
-        runtime_dir = self.settings.artifacts_root.parent / "runtime" / task.id / run_id
+    def _runtime_dir(self, task: Task, run_id: str) -> Path:
+        runtime_root = self.settings.runtime_root or self.settings.artifacts_root.parent / "runtime"
+        return Path(runtime_root) / task.id / run_id
+
+    def _write_runtime_file(self, task: Task, run_id: str, filename: str, content: str) -> Path:
+        runtime_dir = self._runtime_dir(task, run_id)
         runtime_dir.mkdir(parents=True, exist_ok=True)
         runtime_path = runtime_dir / filename
         runtime_path.write_text(content or "", encoding="utf-8")
-        preview = (content or "").strip()
-        if len(preview) > 4000:
-            preview = preview[:4000] + "\n\n[Preview truncated; open the runtime file for full content.]"
-        if not preview:
-            preview = "(empty)"
-        return f"""# Runtime artifact
-
-Full content: `runtime://{task.id}/{run_id}/{filename}`
-
-Filesystem path: `{runtime_path}`
-
-## Preview
-
-```text
-{preview}
-```
-"""
+        return runtime_path
 
     def _run_validation(self, task: Task):
         if not self.settings.run_tests_after_execution:
@@ -1493,6 +1774,10 @@ Score: `{evaluation.score if evaluation.score is not None else "none"}`
             "steps": [step.model_dump(mode="json") for step in steps],
             "evaluations": [evaluation.model_dump(mode="json") for evaluation in evaluations if evaluation.run_id == run_id],
         }
+        runtime_dir = self._runtime_dir(task, run_id)
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        runtime_run_path = runtime_dir / "run.json"
+        runtime_run_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         markdown = [
             "# Run",
             "",
@@ -1502,6 +1787,8 @@ Score: `{evaluation.score if evaluation.score is not None else "none"}`
             f"- Executor: `{run.executor or 'none'}`",
             f"- Iterations: `{run.iteration_count}`",
             f"- Stop reason: `{run.stop_reason or 'none'}`",
+            f"- Runtime run JSON: `runtime://{task.id}/{run.id}/run.json`",
+            f"- Runtime directory: `{runtime_dir}`",
             "",
             "## Steps",
             "",
@@ -1923,6 +2210,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def health():
         return {"ok": True}
 
+    @app.get("/health/tools")
+    def tool_health():
+        return orchestrator.tool_health()
+
     @app.post("/tasks", response_model=CreateTaskResponse)
     def create_task(request: CreateTaskRequest):
         return orchestrator.create_task(request)
@@ -1990,6 +2281,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @app.get("/tasks/{task_id}/corrections/{correction_id}")
+    def get_correction(task_id: str, correction_id: str):
+        try:
+            orchestrator.get_task(task_id)
+            return orchestrator.task_store.get_correction_request(task_id, correction_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.post("/tasks/{task_id}/corrections", response_model=CreateCorrectionResponse)
     def create_correction(task_id: str, request: CreateCorrectionRequest):
         try:
@@ -2013,10 +2312,105 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @app.get("/tasks/{task_id}/tool-health")
+    def task_tool_health(task_id: str):
+        try:
+            return orchestrator.task_tool_health(task_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/tasks/{task_id}/model-decisions")
+    def list_model_decisions(task_id: str):
+        try:
+            return {"items": orchestrator.list_model_decisions(task_id)}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/tasks/{task_id}/prompt-builds")
+    def list_prompt_builds(task_id: str):
+        try:
+            return {"items": orchestrator.list_prompt_builds(task_id)}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.post("/tasks/{task_id}/rebuild-context")
     def rebuild_context(task_id: str):
         try:
             return orchestrator.rebuild_context(task_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/tasks/{task_id}/actions/compact-context", status_code=status.HTTP_202_ACCEPTED)
+    def compact_context_action(task_id: str):
+        try:
+            orchestrator.get_task(task_id)
+            job = orchestrator.job_runner.enqueue(
+                task_id,
+                "compact-context",
+                lambda: orchestrator.compact_context(task_id),
+                input={},
+            )
+            return JobAcceptedResponse(job_id=job.id, task_id=task_id, status=job.status, action=job.action)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/tasks/{task_id}/actions/rebuild-context", status_code=status.HTTP_202_ACCEPTED)
+    def rebuild_context_action(task_id: str):
+        try:
+            orchestrator.get_task(task_id)
+            job = orchestrator.job_runner.enqueue(
+                task_id,
+                "rebuild-context",
+                lambda: orchestrator.rebuild_context(task_id),
+                input={},
+            )
+            return JobAcceptedResponse(job_id=job.id, task_id=task_id, status=job.status, action=job.action)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/tasks/{task_id}/actions/retry-execution", status_code=status.HTTP_202_ACCEPTED)
+    def retry_execution_action(task_id: str):
+        try:
+            orchestrator.get_task(task_id)
+            job = orchestrator.job_runner.enqueue(
+                task_id,
+                "retry-execution",
+                lambda: orchestrator._run_execution(task_id),
+                input={},
+            )
+            return JobAcceptedResponse(job_id=job.id, task_id=task_id, status=job.status, action=job.action)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/tasks/{task_id}/actions/retry-validation", status_code=status.HTTP_202_ACCEPTED)
+    def retry_validation_action(task_id: str):
+        try:
+            orchestrator.get_task(task_id)
+            job = orchestrator.job_runner.enqueue(
+                task_id,
+                "retry-validation",
+                lambda: orchestrator._run_execution(task_id),
+                input={},
+            )
+            return JobAcceptedResponse(job_id=job.id, task_id=task_id, status=job.status, action=job.action)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/tasks/{task_id}/actions/skip-validation-manual")
+    def skip_validation_manual_action(task_id: str):
+        try:
+            task = orchestrator.get_task(task_id)
+            task.status = "awaiting_diff_approval"
+            orchestrator.task_store.update_task(task)
+            orchestrator._add_event(task, "validation_skipped_manual", {})
+            return orchestrator.get_task_payload(task_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/tasks/{task_id}/repair-state")
+    def repair_state(task_id: str):
+        try:
+            return orchestrator.repair_state(task_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -2038,6 +2432,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def get_job(job_id: str):
         try:
             return orchestrator.get_job(job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/jobs/{job_id}/cancel")
+    def cancel_job(job_id: str):
+        try:
+            return orchestrator.cancel_job(job_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

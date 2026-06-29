@@ -5,11 +5,15 @@ import os
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
+from engineering_orchestrator.llm import LLMGateway
+from engineering_orchestrator.llm.types import ModelDecision
 from task_router.models import RouterConfig, UserTaskAnalysis
 
 
 def create_structured_llm():
-    model = os.getenv("TASK_ROUTER_MODEL", "gpt-5.5")
+    model = os.getenv("TASK_ROUTER_MODEL") or os.getenv("TASKER_GPT55_MODEL")
+    if not model:
+        raise RuntimeError("Set TASK_ROUTER_MODEL or TASKER_GPT55_MODEL before using the LLM router.")
     return ChatOpenAI(model=model).with_structured_output(UserTaskAnalysis, method="json_schema")
 
 
@@ -104,13 +108,36 @@ Rules:
 
 
 def analyze_with_llm(text: str, config: RouterConfig, structured_llm=None) -> UserTaskAnalysis:
-    llm = structured_llm or create_structured_llm()
-    response = llm.invoke(
-        [
-            SystemMessage(content=build_router_prompt(config)),
-            HumanMessage(content=text),
-        ]
+    messages = [SystemMessage(content=build_router_prompt(config)), HumanMessage(content=text)]
+    if structured_llm is not None:
+        response = structured_llm.invoke(messages)
+        if isinstance(response, UserTaskAnalysis):
+            return response
+        return UserTaskAnalysis.model_validate(response)
+
+    model = os.getenv("TASK_ROUTER_MODEL") or os.getenv("TASKER_GPT55_MODEL")
+    if not model:
+        raise RuntimeError("Set TASK_ROUTER_MODEL or TASKER_GPT55_MODEL before using the LLM router.")
+    decision = ModelDecision(
+        target_id="gpt55_medium",
+        runtime="responses_api",
+        model=model,
+        reasoning_effort="medium",
+        profile="router",
+        operation="route_task",
+        reason="task router LLM fallback",
+        max_prompt_chars=20000,
+        allow_escalation=False,
     )
+
+    def provider(_prompt: str, _decision: ModelDecision) -> str:
+        value = create_structured_llm().invoke(messages)
+        if isinstance(value, UserTaskAnalysis):
+            return value.model_dump_json()
+        return UserTaskAnalysis.model_validate(value).model_dump_json()
+
+    result = LLMGateway().call(decision, f"{messages[0].content}\n\n{messages[1].content}", provider=provider)
+    response = UserTaskAnalysis.model_validate_json(result.text)
     if isinstance(response, UserTaskAnalysis):
         return response
     return UserTaskAnalysis.model_validate(response)

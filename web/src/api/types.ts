@@ -75,10 +75,52 @@ export interface TaskJob {
   task_id: string;
   action: string;
   status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | string;
+  input?: Record<string, unknown>;
+  result?: Record<string, unknown> | null;
   error?: string | null;
   created_at: string;
   started_at?: string | null;
   finished_at?: string | null;
+}
+
+export interface ModelDecision {
+  id: string;
+  task_id?: string | null;
+  run_id?: string | null;
+  operation: string;
+  profile: string;
+  selected_target: string;
+  runtime: string;
+  model: string;
+  reasoning_effort?: string | null;
+  reason: string;
+  estimated_prompt_chars: number;
+  max_prompt_chars: number;
+  created_at: string;
+}
+
+export interface PromptBuild {
+  id: string;
+  task_id?: string | null;
+  run_id?: string | null;
+  operation: string;
+  total_chars: number;
+  budget_chars: number;
+  included: Array<Record<string, unknown>>;
+  excluded: Array<Record<string, unknown>>;
+  status: string;
+  created_at: string;
+}
+
+export interface ToolHealth {
+  mode: string;
+  project_id?: string | null;
+  manual_review_required?: boolean;
+  items: Record<string, boolean>;
+  required_tools?: string[];
+  unavailable_mcp?: string[];
+  validation_profile?: string;
+  test_commands?: string[];
 }
 
 export interface TaskArtifact {

@@ -1,0 +1,183 @@
+active_profile: balanced
+
+profiles:
+  cheap:
+    description: "Minimize cost. Strong models only when explicitly required."
+    default_reasoning_target: gpt55_medium
+    default_executor_target: codex_spark
+    require_user_approval_for_extra_high: true
+
+  balanced:
+    description: "Default daily mode."
+    default_reasoning_target: gpt55_medium
+    default_executor_target: codex_gpt55_medium
+    require_user_approval_for_extra_high: false
+
+  quality:
+    description: "Maximum quality for complex tasks."
+    default_reasoning_target: gpt55_high
+    default_executor_target: codex_gpt55_high
+    require_user_approval_for_extra_high: false
+
+  mock:
+    description: "No real LLM calls."
+    default_reasoning_target: mock
+    default_executor_target: mock
+
+model_targets:
+  deterministic:
+    runtime: deterministic
+    model: none
+    reasoning_effort: none
+
+  mock:
+    runtime: mock
+    model: mock
+    reasoning_effort: none
+
+  gpt55_medium:
+    runtime: responses_api
+    model: ${TASKER_GPT55_MODEL}
+    reasoning_effort: medium
+    purpose: "Default planning, ordinary review, explanations, summaries"
+
+  gpt55_high:
+    runtime: responses_api
+    model: ${TASKER_GPT55_MODEL}
+    reasoning_effort: high
+    purpose: "Complex planning, risky review, 1C business logic"
+
+  gpt55_extra_high:
+    runtime: responses_api
+    model: ${TASKER_GPT55_MODEL}
+    reasoning_effort: extra_high
+    provider_reasoning_effort: xhigh
+    fallback_reasoning_effort: high
+    purpose: "Hardest tasks only"
+
+  codex_spark:
+    runtime: codex_cli
+    model: ${TASKER_CODEX_SPARK_MODEL}
+    reasoning_effort: medium
+    purpose: "Cheapest focused coding iterations and micro-corrections"
+
+  codex_gpt55_medium:
+    runtime: codex_cli
+    model: ${TASKER_GPT55_MODEL}
+    reasoning_effort: medium
+    purpose: "Normal code execution in worktree"
+
+  codex_gpt55_high:
+    runtime: codex_cli
+    model: ${TASKER_GPT55_MODEL}
+    reasoning_effort: high
+    purpose: "Complex code execution in worktree"
+
+operation_routes:
+  route_task:
+    first: deterministic
+    fallback: gpt55_medium
+    use_llm_only_when:
+      - project_confidence_below: 0.75
+      - workflow_confidence_below: 0.75
+      - ambiguous_request: true
+
+  classify_correction:
+    first: deterministic
+    fallback: gpt55_medium
+    escalate_to: gpt55_high
+
+  create_simple_plan:
+    first: gpt55_medium
+    escalate_to: gpt55_high
+
+  create_complex_spec:
+    first: gpt55_high
+    escalate_to: gpt55_extra_high
+
+  create_1c_business_spec:
+    first: gpt55_high
+    escalate_to: gpt55_extra_high
+
+  execute_micro_correction:
+    first: codex_spark
+    prompt_mode: compact_correction
+
+  execute_simple_code_change:
+    first: codex_gpt55_medium
+    fallback: codex_spark
+
+  execute_complex_code_change:
+    first: codex_gpt55_high
+
+  review_diff:
+    first: deterministic
+    fallback: gpt55_medium
+    escalate_to: gpt55_high
+    use_llm_when:
+      - diff_lines_above: 300
+      - changed_files_above: 5
+      - risk_level: high
+
+  review_high_risk_diff:
+    first: gpt55_high
+    escalate_to: gpt55_extra_high
+
+  summarize_artifact:
+    first: gpt55_medium
+
+  compact_context:
+    first: gpt55_medium
+    fallback: gpt55_high
+
+  commit_message:
+    first: gpt55_medium
+
+  evaluate_policy:
+    first: deterministic
+
+workflow_routes:
+  question_only:
+    answer: gpt55_medium
+    executor: none
+    reviewer: none
+
+  simple_dev_no_config:
+    planning: gpt55_medium
+    execution: codex_gpt55_medium
+    correction:
+      micro: codex_spark
+      minor: codex_gpt55_medium
+    review: deterministic_then_gpt55_medium
+
+  simple_dev_with_config:
+    planning: gpt55_high
+    execution: codex_gpt55_medium
+    correction:
+      micro: codex_spark
+      minor: codex_gpt55_medium
+      risky: codex_gpt55_high
+    review: gpt55_high
+
+  1c_business_logic_change:
+    planning: gpt55_high
+    spec: gpt55_high
+    execution: codex_gpt55_high
+    correction:
+      micro: codex_spark
+      minor: codex_gpt55_medium
+      risky: codex_gpt55_high
+    review: gpt55_high
+    escalate_to: gpt55_extra_high
+
+  complex_change:
+    planning: gpt55_extra_high
+    execution: codex_gpt55_high
+    review: gpt55_high
+    correction: codex_gpt55_high
+
+  task_correction:
+    classify: gpt55_medium
+    planning: none
+    execution: codex_spark
+    review: deterministic_then_gpt55_medium

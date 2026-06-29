@@ -123,6 +123,7 @@ class CodexExecutor:
         )
 
     def _build_prompt(self, task: Task, artifacts: list[TaskArtifact]) -> str:
+        is_correction = any(artifact.kind == "correction_request" for artifact in artifacts)
         artifact_sections = []
         total_artifact_chars = 0
         for artifact in self._prompt_artifacts(artifacts):
@@ -145,6 +146,36 @@ class CodexExecutor:
                 f"Path: {path}\n\n"
                 f"```markdown\n{content}\n```"
             )
+
+        if is_correction:
+            return f"""
+You are applying a user-requested correction to an already reviewed diff.
+
+Task ID: {task.id}
+Project: {task.project_id} / {task.project_name}
+Workflow: {task.workflow_id} / {task.workflow_name}
+Risk: {task.risk_level}
+
+Original user request:
+{task.user_message}
+
+Instructions:
+- The user review comment is approval to execute this correction.
+- Do not regenerate the full plan.
+- Do not expand task scope.
+- Only modify the current diff according to the correction comment.
+- Do not touch unrelated files.
+- Do not commit changes.
+- Do not change secrets.
+- Do not deploy.
+- Respect any executor policy artifact below, including allowed paths, blocked paths, diff size, and changed-file limits.
+- Run relevant local checks when they are obvious and safe.
+- If the correction cannot be completed, leave clear notes in your final output.
+
+Artifacts:
+
+{chr(10).join(artifact_sections) if artifact_sections else "No readable correction artifacts were provided."}
+""".strip()
 
         return f"""
 You are Codex running inside an approved task worktree.

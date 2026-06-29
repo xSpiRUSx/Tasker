@@ -7,7 +7,14 @@ from pydantic import BaseModel
 from engineering_assistant.settings import load_settings
 from engineering_assistant.task_router import TaskRouter
 from engineering_orchestrator.api import Orchestrator
-from engineering_orchestrator.models import ApprovalDecisionRequest, CancelTaskRequest, ContinueTaskRequest, CreateTaskRequest
+from engineering_orchestrator.models import (
+    ApprovalDecisionRequest,
+    CancelTaskRequest,
+    ContinueTaskRequest,
+    CreateCorrectionRequest,
+    CreateCorrectionResponse,
+    CreateTaskRequest,
+)
 from engineering_orchestrator.settings import Settings
 from engineering_orchestrator.ui import register_ui_routes
 
@@ -103,6 +110,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return {"items": orchestrator.list_approvals(task_id)}
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/tasks/{task_id}/corrections")
+    def list_corrections(task_id: str):
+        try:
+            return {"items": orchestrator.list_corrections(task_id)}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/tasks/{task_id}/corrections", response_model=CreateCorrectionResponse)
+    def create_correction(task_id: str, request: CreateCorrectionRequest):
+        try:
+            return orchestrator.create_correction(task_id, request)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/tasks/{task_id}/events")
     def list_events(task_id: str):

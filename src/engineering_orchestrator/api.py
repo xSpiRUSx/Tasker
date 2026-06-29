@@ -14,7 +14,10 @@ from engineering_orchestrator.models import (
     ApprovalDecisionRequest,
     CancelTaskRequest,
     ContinueTaskRequest,
+    CorrectionRequest,
     CreateTaskRequest,
+    CreateCorrectionRequest,
+    CreateCorrectionResponse,
     CreateTaskResponse,
     JobAcceptedResponse,
     RouteDecision,
@@ -22,6 +25,7 @@ from engineering_orchestrator.models import (
 )
 from engineering_orchestrator.services.approval_service import ApprovalService
 from engineering_orchestrator.services.artifact_store import ArtifactStore, slugify, slugify_short
+from engineering_orchestrator.services.correction_classifier import CorrectionClassifier, CorrectionClassifierInput
 from engineering_orchestrator.services.event_service import EventService
 from engineering_orchestrator.services.executor_service import ExecutorService
 from engineering_orchestrator.services.git_service import GitService
@@ -72,6 +76,7 @@ class Orchestrator:
         )
         self.validation_service = ValidationService()
         self.review_service = ReviewService()
+        self.correction_classifier = CorrectionClassifier()
         self.task_router = task_router
         self.prompt_builder = PromptBuilder()
         self.context_builder = ContextBuilder(
@@ -161,6 +166,10 @@ class Orchestrator:
         self.task_store.get_task(task_id)
         return self.task_store.list_approvals(task_id)
 
+    def list_corrections(self, task_id: str):
+        self.task_store.get_task(task_id)
+        return self.task_store.list_correction_requests(task_id)
+
     def list_events(self, task_id: str):
         self.task_store.get_task(task_id)
         return self.task_store.list_events(task_id)
@@ -240,9 +249,14 @@ class Orchestrator:
         if request.decision == "reject":
             self.task_store.resolve_approval(approval.id, "rejected", request.comment)
             if gate == "diff":
-                self._create_correction_request(task, gate, request.comment)
-                self._add_event(task, "diff_correction_requested", {"comment": request.comment})
-                return self._revise_plan(task_id, request.comment or "Diff was rejected; prepare a focused correction plan.")
+                correction_request = CreateCorrectionRequest(
+                    source_gate=gate,
+                    source_approval_id=approval.id,
+                    comment=request.comment or "Apply the requested diff correction.",
+                    action="run_without_new_plan",
+                )
+                self.create_correction(task_id, correction_request, resolved_approval=approval)
+                return self.task_store.get_task(task_id)
             task.status = "plan_rejected" if gate == "plan" else "changes_requested"
             self.task_store.update_task(task)
             self._add_event(task, f"{gate}_approval_rejected", {"comment": request.comment})
@@ -251,9 +265,15 @@ class Orchestrator:
 
         self.task_store.resolve_approval(approval.id, "approved", request.comment)
         self._add_event(task, f"{gate}_approval_approved", {"comment": request.comment})
+        correction_id = approval.requested_payload.get("correction_request_id")
+        if correction_id and gate == "plan":
+            correction = self.task_store.get_correction_request(task_id, str(correction_id))
+            return self._run_correction_execution(task_id, correction)
         if gate == "plan" or gate in PRE_EXECUTION_GATE_ORDER:
             return self._advance_after_pre_execution_approval(task_id)
         if gate == "diff":
+            if correction_id:
+                self.task_store.update_correction_request_status(str(correction_id), "diff_approved")
             return self._advance_after_diff_approval(task_id)
         if gate == "commit":
             return self._commit_and_close(task_id)
@@ -510,32 +530,290 @@ class Orchestrator:
         self._write_index(self.task_store.get_task(task.id), "Revised plan is pending approval gate: `plan`.")
         return self.task_store.get_task(task_id)
 
-    def _create_correction_request(self, task: Task, gate: str, comment: str | None):
-        body = comment.strip() if comment and comment.strip() else "No rejection comment was provided."
-        version = self._next_plan_version(task.id)
-        markdown = f"""# Correction request
+    def create_correction(
+        self,
+        task_id: str,
+        request: CreateCorrectionRequest,
+        resolved_approval=None,
+    ) -> CreateCorrectionResponse:
+        task = self.task_store.get_task(task_id)
+        comment = request.comment.strip()
+        if not comment:
+            raise ValueError("Correction comment is required.")
 
-## Rejected gate
+        source_approval = resolved_approval
+        if source_approval is None and request.source_approval_id:
+            source_approval = next(
+                (approval for approval in self.task_store.list_approvals(task_id) if approval.id == request.source_approval_id),
+                None,
+            )
+        if source_approval is None and request.source_gate:
+            approvals = [approval for approval in self.task_store.list_approvals(task_id) if approval.gate == request.source_gate]
+            source_approval = approvals[-1] if approvals else None
 
-`{gate}`
+        changed_files = []
+        if source_approval is not None:
+            changed_files = list(source_approval.requested_payload.get("reviewed_files") or [])
+            pending = self.task_store.get_pending_approval(task_id, source_approval.gate)
+            if pending is not None and pending.id == source_approval.id:
+                self.task_store.resolve_approval(source_approval.id, "rejected", comment)
+
+        task.status = "classifying_correction"
+        self.task_store.update_task(task)
+        classifier_result = self.correction_classifier.classify(
+            CorrectionClassifierInput(
+                comment=comment,
+                action=request.action,
+                changed_files=changed_files,
+                risk_flags=list((task.route_decision or {}).get("risk_flags") or []),
+                task_has_approved_plan=self._has_approved_plan(task_id),
+            )
+        )
+
+        approved_for_execution = classifier_result.approved_for_execution and not classifier_result.requires_plan_approval
+        status = "correction_requested"
+        if approved_for_execution:
+            status = "executing_correction"
+        elif classifier_result.mode == "new_task":
+            status = "correction_blocked"
+        response_status = status
+        correction = self.task_store.create_correction_request(
+            task_id=task_id,
+            source_gate=request.source_gate,
+            source_approval_id=source_approval.id if source_approval else request.source_approval_id,
+            source_artifact_id=request.source_artifact_id,
+            user_comment=comment,
+            mode=classifier_result.mode,
+            status=status,
+            approved_for_execution=approved_for_execution,
+            requires_plan_approval=classifier_result.requires_plan_approval,
+            requires_spec_addendum=classifier_result.requires_spec_addendum,
+            classifier_result=classifier_result.model_dump(mode="json"),
+        )
+        self._write_correction_artifacts(task, correction, changed_files)
+        self._add_event(
+            task,
+            "correction_request_created",
+            {
+                "correction_id": correction.id,
+                "mode": correction.mode,
+                "approved_for_execution": approved_for_execution,
+                "requires_plan_approval": classifier_result.requires_plan_approval,
+            },
+        )
+
+        if approved_for_execution:
+            self._run_correction_execution(task_id, correction)
+        elif classifier_result.mode == "new_task":
+            task = self.task_store.get_task(task_id)
+            task.status = "correction_blocked"
+            self.task_store.update_task(task)
+            self._write_index(task, "Correction is blocked because it appears to be a new linked task.")
+        else:
+            self._request_correction_plan_approval(task_id, correction)
+            response_status = "awaiting_correction_plan_approval"
+
+        return CreateCorrectionResponse(
+            correction_id=correction.id,
+            mode=correction.mode,
+            status=response_status,
+            approved_for_execution=correction.approved_for_execution,
+            requires_plan_approval=correction.requires_plan_approval,
+            requires_spec_addendum=correction.requires_spec_addendum,
+        )
+
+    def _has_approved_plan(self, task_id: str) -> bool:
+        return any(approval.gate == "plan" and approval.status == "approved" for approval in self.task_store.list_approvals(task_id))
+
+    def _write_correction_artifacts(self, task: Task, correction: CorrectionRequest, changed_files: list[str]) -> None:
+        version = int(correction.id.rsplit("-", 1)[-1])
+        request_artifact = self.artifact_store.write_markdown(
+            task,
+            "correction_request",
+            f"Correction {version:03d}",
+            self._correction_request_markdown(correction),
+            version=version,
+            frontmatter={
+                "correction_id": correction.id,
+                "source_gate": correction.source_gate,
+                "source_approval_id": correction.source_approval_id,
+                "mode": correction.mode,
+                "approved_for_execution": str(correction.approved_for_execution).lower(),
+            },
+        )
+        self.task_store.add_artifact(request_artifact)
+
+        context_artifact = self.artifact_store.write_markdown(
+            task,
+            "correction_context",
+            f"Correction {version:03d} context",
+            self._correction_context_markdown(task, correction, changed_files),
+            version=version,
+        )
+        self.task_store.add_artifact(context_artifact)
+
+        if correction.requires_spec_addendum:
+            addendum = self.artifact_store.write_markdown(
+                task,
+                "spec_addendum",
+                f"Spec addendum for {correction.id}",
+                self._spec_addendum_markdown(task, correction),
+                version=version,
+            )
+            self.task_store.add_artifact(addendum)
+
+    def _request_correction_plan_approval(self, task_id: str, correction: CorrectionRequest) -> Task:
+        task = self.task_store.get_task(task_id)
+        artifacts = [
+            artifact
+            for artifact in self.task_store.list_artifacts(task.id)
+            if artifact.kind in {"correction_request", "correction_context", "spec_addendum"}
+            and artifact.version == int(correction.id.rsplit("-", 1)[-1])
+        ]
+        approval = self.task_store.create_approval(
+            task.id,
+            "plan",
+            [artifact.id for artifact in artifacts],
+            {
+                "approves": ["focused correction execution"],
+                "correction_request_id": correction.id,
+                "correction_mode": correction.mode,
+                "spec_addendum": correction.requires_spec_addendum,
+            },
+        )
+        self.task_store.update_correction_request_status(correction.id, "awaiting_correction_plan_approval")
+        task.status = "awaiting_plan_approval"
+        self.task_store.update_task(task)
+        self._add_event(task, "correction_plan_approval_requested", {"approval_id": approval.id, "correction_id": correction.id})
+        self._write_index(self.task_store.get_task(task.id), "Correction plan is pending approval gate: `plan`.")
+        return self.task_store.get_task(task_id)
+
+    def _correction_execution_artifacts(self, task: Task, correction: CorrectionRequest) -> list:
+        version = int(correction.id.rsplit("-", 1)[-1])
+        allowed = {"correction_request", "correction_context", "spec_addendum", "executor_policy"}
+        return [
+            artifact
+            for artifact in self.task_store.list_artifacts(task.id)
+            if artifact.kind in allowed and (artifact.version in {None, version} or artifact.kind == "executor_policy")
+        ]
+
+    def _correction_request_markdown(self, correction: CorrectionRequest) -> str:
+        return f"""# Correction {correction.id.rsplit("-", 1)[-1]}
 
 ## User comment
 
-{body}
+{correction.user_comment}
 
-## Required next step
+## Execution policy
 
-Create a focused v{version} correction plan from this comment. Preserve unrelated files and previous approved scope unless the comment explicitly changes it.
+- Do not create new features.
+- Do not regenerate the full plan.
+- Do not modify unrelated files.
+- Preserve already useful changes.
+- Only fix the reviewed diff according to the comment.
+
+## Approval
+
+This correction was approved by the user review comment.
+
+## Classifier
+
+- Mode: `{correction.mode}`
+- Approved for execution: `{str(correction.approved_for_execution).lower()}`
+- Requires plan approval: `{str(correction.requires_plan_approval).lower()}`
+- Requires spec addendum: `{str(correction.requires_spec_addendum).lower()}`
+- Reason: {correction.classifier_result.get("reason", "No reason recorded.")}
 """
-        artifact = self.artifact_store.write_markdown(
-            task,
-            "correction_request",
-            f"Correction request v{version}",
-            markdown,
-            version=version,
-        )
-        self.task_store.add_artifact(artifact)
-        return artifact
+
+    def _correction_context_markdown(self, task: Task, correction: CorrectionRequest, changed_files: list[str]) -> str:
+        allowed_paths = self.projects.allowed_paths(task.project_id)
+        blocked_paths = self.projects.blocked_paths(task.project_id)
+        diff_summary = ""
+        diff_artifact = self.task_store.get_artifact(task.id, "diff_summary")
+        if diff_artifact is not None:
+            diff_summary = self.artifact_store.read_text(diff_artifact)
+            if len(diff_summary) > 5000:
+                diff_summary = diff_summary[:5000] + "\n\n[Diff summary truncated for correction context.]"
+        return f"""# Correction context
+
+You are applying a user-requested correction to an already reviewed diff.
+
+The user has already approved execution of this correction by submitting this review comment.
+
+Do not regenerate the full plan.
+Do not expand task scope.
+Only modify the current diff according to the comment.
+Do not touch unrelated files.
+
+## User correction
+
+{correction.user_comment}
+
+## Current changed files
+
+{self._bullet_list(changed_files)}
+
+## Allowed files
+
+{self._bullet_list(allowed_paths or ["Any source, test, or documentation path not blocked below."])}
+
+## Blocked files
+
+{self._bullet_list(blocked_paths)}
+
+## Approved task summary
+
+- Task: `{task.id}`
+- Original request: {task.user_message}
+- Project: `{task.project_id or "unknown"}`
+- Workflow: `{task.workflow_id or "unknown"}`
+
+## Current diff summary
+
+{diff_summary or "No diff summary artifact is available."}
+"""
+
+    def _spec_addendum_markdown(self, task: Task, correction: CorrectionRequest) -> str:
+        return f"""# Spec Addendum
+
+## Task
+
+`{task.id}`
+
+## Correction
+
+`{correction.id}` / `{correction.mode}`
+
+## User comment
+
+{correction.user_comment}
+
+## Approval reason
+
+{correction.classifier_result.get("reason", "Correction changes requirements or risky areas.")}
+"""
+
+    def _correction_result_markdown(self, correction: CorrectionRequest, changed_files: list[str], diff_stat: str) -> str:
+        return f"""# Correction result
+
+## Correction
+
+`{correction.id}` / `{correction.mode}`
+
+## Status
+
+Awaiting updated diff approval.
+
+## Changed files
+
+{self._bullet_list(changed_files)}
+
+## Diff stat
+
+```text
+{diff_stat}
+```
+"""
 
     def _next_plan_version(self, task_id: str) -> int:
         versions = [
@@ -618,26 +896,40 @@ Create a focused v{version} correction plan from this comment. Preserve unrelate
             require_human_on_config_change=self.settings.loop_require_human_on_config_change,
         )
 
-    def _run_execution(self, task_id: str) -> Task:
+    def _run_correction_execution(self, task_id: str, correction: CorrectionRequest) -> Task:
+        return self._run_execution(task_id, correction)
+
+    def _run_execution(self, task_id: str, correction: CorrectionRequest | None = None) -> Task:
         task = self.task_store.get_task(task_id)
+        is_correction = correction is not None
         run = self.task_store.create_run(
             task.id,
-            "execution",
+            "correction" if is_correction else "execution",
             executor=self.settings.default_executor,
             model=self.settings.codex_model if self.settings.default_executor == "codex" else None,
+            correction_request_id=correction.id if correction else None,
         )
-        task.status = "approved_for_execution"
-        self.task_store.update_task(task)
-        self._add_event(task, "approved_for_execution", {"run_id": run.id})
+        if is_correction:
+            task.status = "executing_correction"
+            self.task_store.update_task(task)
+            self.task_store.update_correction_request_status(correction.id, "executing_correction")
+            self._add_event(task, "correction_execution_started", {"run_id": run.id, "correction_id": correction.id})
+        else:
+            task.status = "approved_for_execution"
+            self.task_store.update_task(task)
+            self._add_event(task, "approved_for_execution", {"run_id": run.id})
 
         if self.settings.default_executor == "codex" and not task.worktree_path:
             task = self._prepare_worktree(task)
         if self.settings.default_executor == "codex":
             self._write_executor_policy(task)
 
-        task.status = "executing"
+        task.status = "executing_correction" if is_correction else "executing"
         self.task_store.update_task(task)
-        result = self.executor.execute(task, self.task_store.list_artifacts(task.id))
+        execution_artifacts = (
+            self._correction_execution_artifacts(task, correction) if is_correction else self.task_store.list_artifacts(task.id)
+        )
+        result = self.executor.execute(task, execution_artifacts)
         execution = self.artifact_store.write_markdown(
             task,
             "execution_log",
@@ -659,8 +951,16 @@ Create a focused v{version} correction plan from this comment. Preserve unrelate
         )
 
         if result.status != "success":
-            task.status = "prompt_too_large" if "prompt_too_large" in result.summary else "changes_requested"
+            task.status = (
+                "prompt_too_large"
+                if "prompt_too_large" in result.summary
+                else "correction_blocked"
+                if is_correction
+                else "changes_requested"
+            )
             self.task_store.update_task(task)
+            if is_correction:
+                self.task_store.update_correction_request_status(correction.id, "correction_blocked")
             validation = self.artifact_store.write_markdown(
                 task,
                 "validation_report",
@@ -702,10 +1002,13 @@ Create a focused v{version} correction plan from this comment. Preserve unrelate
             self.task_store.finish_run(run.id, "failed", iteration_count=1, stop_reason="executor_failed")
             self._write_run_artifacts(task, run.id)
             self._add_event(task, "validation_skipped", {"reason": "execution_not_successful", "execution_status": result.status})
-            self._write_index(self.task_store.get_task(task.id), "Execution failed. Awaiting corrections.")
+            self._write_index(
+                self.task_store.get_task(task.id),
+                "Correction execution failed." if is_correction else "Execution failed. Awaiting corrections.",
+            )
             return self.task_store.get_task(task.id)
 
-        task.status = "validating"
+        task.status = "validating_correction" if is_correction else "validating"
         self.task_store.update_task(task)
         validation_result = self._run_validation(task)
         validation = self.artifact_store.write_markdown(
@@ -819,12 +1122,17 @@ Create a focused v{version} correction plan from this comment. Preserve unrelate
                 task.status = "validation_failed"
                 stop_reason = "validation_failed"
             else:
-                task.status = "changes_requested"
+                task.status = "correction_blocked" if is_correction else "changes_requested"
                 stop_reason = loop_evaluation.status
             self.task_store.update_task(task)
+            if is_correction:
+                self.task_store.update_correction_request_status(correction.id, "correction_blocked")
             self.task_store.finish_run(run.id, loop_evaluation.status, iteration_count=1, stop_reason=stop_reason)
             self._write_run_artifacts(task, run.id)
-            self._write_index(self.task_store.get_task(task.id), "Evaluation did not pass. Awaiting corrections.")
+            self._write_index(
+                self.task_store.get_task(task.id),
+                "Correction evaluation did not pass." if is_correction else "Evaluation did not pass. Awaiting corrections.",
+            )
             return self.task_store.get_task(task.id)
 
         task.status = "reviewing"
@@ -857,11 +1165,31 @@ Create a focused v{version} correction plan from this comment. Preserve unrelate
             self._write_index(self.task_store.get_task(task.id), "Diff approval is disabled by policy.")
             return self._advance_after_diff_approval(task.id)
 
+        if is_correction:
+            result_artifact = self.artifact_store.write_markdown(
+                task,
+                "correction_result",
+                f"{correction.id} result",
+                self._correction_result_markdown(correction, result.changed_files, diff_stat),
+                version=int(correction.id.rsplit("-", 1)[-1]),
+            )
+            self.task_store.add_artifact(result_artifact)
+            approval_artifacts.append(result_artifact.id)
+            diff_payload["correction_request_id"] = correction.id
+            self.task_store.update_correction_request_status(correction.id, "awaiting_correction_diff_approval")
+
         approval = self.task_store.create_approval(task.id, "diff", approval_artifacts, diff_payload)
-        task.status = "awaiting_diff_approval"
+        task.status = "awaiting_correction_diff_approval" if is_correction else "awaiting_diff_approval"
         self.task_store.update_task(task)
-        self._add_event(task, "diff_approval_requested", {"approval_id": approval.id})
-        self._write_index(self.task_store.get_task(task.id), "Pending approval gate: `diff`.")
+        self._add_event(
+            task,
+            "correction_diff_approval_requested" if is_correction else "diff_approval_requested",
+            {"approval_id": approval.id, "correction_id": correction.id if correction else None},
+        )
+        self._write_index(
+            self.task_store.get_task(task.id),
+            "Review updated diff for the correction." if is_correction else "Pending approval gate: `diff`.",
+        )
         return self.task_store.get_task(task.id)
 
     def _advance_after_diff_approval(self, task_id: str) -> Task:
@@ -1654,6 +1982,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return {"items": orchestrator.list_approvals(task_id)}
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/tasks/{task_id}/corrections")
+    def list_corrections(task_id: str):
+        try:
+            return {"items": orchestrator.list_corrections(task_id)}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/tasks/{task_id}/corrections", response_model=CreateCorrectionResponse)
+    def create_correction(task_id: str, request: CreateCorrectionRequest):
+        try:
+            return orchestrator.create_correction(task_id, request)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/tasks/{task_id}/events")
     def list_events(task_id: str):

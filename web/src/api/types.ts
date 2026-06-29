@@ -18,6 +18,12 @@ export type TaskStatus =
   | "validation_failed"
   | "awaiting_diff_approval"
   | "changes_requested"
+  | "correction_requested"
+  | "classifying_correction"
+  | "executing_correction"
+  | "validating_correction"
+  | "awaiting_correction_diff_approval"
+  | "correction_blocked"
   | "awaiting_commit_approval"
   | "approved_for_commit"
   | "committing"
@@ -175,6 +181,23 @@ export interface ArtifactContentResponse {
 export interface ApprovalDecisionInput {
   decision: "approve" | "reject";
   comment?: string | null;
+}
+
+export interface CorrectionRequestInput {
+  source_gate?: string;
+  source_approval_id?: string | null;
+  source_artifact_id?: string | null;
+  comment: string;
+  action: "run_without_new_plan" | "show_plan_first";
+}
+
+export interface CorrectionResponse {
+  correction_id: string;
+  mode: "micro_correction" | "minor_correction" | "spec_addendum" | "new_task" | string;
+  status: string;
+  approved_for_execution: boolean;
+  requires_plan_approval: boolean;
+  requires_spec_addendum: boolean;
 }
 
 export interface AgentRun {

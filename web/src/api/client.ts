@@ -4,6 +4,8 @@ import type {
   Approval,
   ApprovalDecisionInput,
   ArtifactContentResponse,
+  CorrectionRequestInput,
+  CorrectionResponse,
   CreateTaskRequest,
   CreateTaskResponse,
   HealthResponse,
@@ -125,6 +127,13 @@ export async function listEvents(taskId: string): Promise<{ items: TaskEvent[] }
 
 export function decideApproval(taskId: string, gate: string, input: ApprovalDecisionInput): Promise<JobAcceptedResponse> {
   return request<JobAcceptedResponse>(`/tasks/${encodeURIComponent(taskId)}/approvals/${encodeURIComponent(gate)}`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function createCorrection(taskId: string, input: CorrectionRequestInput): Promise<CorrectionResponse> {
+  return request<CorrectionResponse>(`/tasks/${encodeURIComponent(taskId)}/corrections`, {
     method: "POST",
     body: JSON.stringify(input),
   });

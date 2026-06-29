@@ -23,6 +23,7 @@ const STATUS_GROUPS: Record<string, string[]> = {
     "awaiting_migration_approval",
     "awaiting_security_approval",
     "awaiting_diff_approval",
+    "awaiting_correction_diff_approval",
     "awaiting_commit_approval",
     "awaiting_deploy_approval",
   ],
@@ -34,12 +35,14 @@ const STATUS_GROUPS: Record<string, string[]> = {
     "approved_for_execution",
     "preparing_worktree",
     "executing",
+    "executing_correction",
     "validating",
+    "validating_correction",
     "reviewing",
     "committing",
     "deploy_prep",
   ],
-  "group:changes": ["plan_rejected", "changes_requested", "prompt_too_large", "awaiting_clarification"],
+  "group:changes": ["plan_rejected", "changes_requested", "prompt_too_large", "awaiting_clarification", "correction_blocked"],
   "group:failed": ["failed", "validation_failed"],
 };
 

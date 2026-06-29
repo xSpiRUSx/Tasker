@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { Check, X } from "lucide-react";
-import { decideApproval } from "../api/client";
+import { Check, Play, ClipboardList, X } from "lucide-react";
+import { createCorrection, decideApproval } from "../api/client";
 import type { Approval } from "../api/types";
 
 interface ApprovalPanelProps {
@@ -16,8 +16,9 @@ const DANGEROUS_GATES = new Set(["diff", "commit", "config_change", "migration",
 
 export function ApprovalPanel({ approvals, busy, onRefresh, setError, setToast, taskId }: ApprovalPanelProps) {
   const [comment, setComment] = useState("");
-  const [loading, setLoading] = useState<"approve" | "reject" | null>(null);
+  const [loading, setLoading] = useState<"approve" | "reject" | "run" | "plan" | null>(null);
   const pending = approvals.find((approval) => approval.status === "pending") || null;
+  const isDiffGate = pending?.gate === "diff";
 
   async function decide(decision: "approve" | "reject") {
     if (!pending) return;
@@ -46,6 +47,35 @@ export function ApprovalPanel({ approvals, busy, onRefresh, setError, setToast, 
     }
   }
 
+  async function requestCorrection(action: "run_without_new_plan" | "show_plan_first") {
+    if (!pending) return;
+    if (!comment.trim()) {
+      setError("Request changes requires a non-empty comment.");
+      return;
+    }
+    const loadingKey = action === "run_without_new_plan" ? "run" : "plan";
+    setLoading(loadingKey);
+    try {
+      const correction = await createCorrection(taskId, {
+        source_gate: pending.gate,
+        source_approval_id: pending.id,
+        comment: comment.trim(),
+        action,
+      });
+      setToast(
+        action === "run_without_new_plan"
+          ? `Correction request created. Mode: ${correction.mode}. Approval already granted by your review comment.`
+          : `Correction request created. Mode: ${correction.mode}. Plan approval requested.`,
+      );
+      setComment("");
+      await onRefresh();
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Correction request failed");
+    } finally {
+      setLoading(null);
+    }
+  }
+
   return (
     <section className="panel">
       <h2>Approval</h2>
@@ -62,19 +92,34 @@ export function ApprovalPanel({ approvals, busy, onRefresh, setError, setToast, 
             <dd>{pending.artifact_ids.join(", ") || "none"}</dd>
           </dl>
           <p className="approval-note">
-            Approving this gate can immediately open the next required gate.
+            {isDiffGate
+              ? "A diff review comment is approval to apply that focused correction unless it changes scope or touches risky areas."
+              : "Approving this gate can immediately open the next required gate."}
           </p>
           <pre className="json-block">{JSON.stringify(pending.requested_payload, null, 2)}</pre>
           <textarea value={comment} onChange={(event) => setComment(event.target.value)} placeholder="comment" rows={4} />
           <div className="button-row">
             <button type="button" disabled={busy === "approval" || loading !== null} onClick={() => void decide("approve")}>
               <Check size={16} />
-              {loading === "approve" ? "Approving..." : "Approve"}
+              {loading === "approve" ? "Approving..." : isDiffGate ? "Approve diff" : "Approve"}
             </button>
-            <button type="button" disabled={busy === "approval" || loading !== null} onClick={() => void decide("reject")}>
-              <X size={16} />
-              {loading === "reject" ? "Rejecting..." : "Reject with comment"}
-            </button>
+            {isDiffGate ? (
+              <>
+                <button type="button" disabled={busy === "approval" || loading !== null} onClick={() => void requestCorrection("run_without_new_plan")}>
+                  <Play size={16} />
+                  {loading === "run" ? "Requesting..." : "Request changes & run"}
+                </button>
+                <button type="button" disabled={busy === "approval" || loading !== null} onClick={() => void requestCorrection("show_plan_first")}>
+                  <ClipboardList size={16} />
+                  {loading === "plan" ? "Requesting..." : "Request changes, but show plan first"}
+                </button>
+              </>
+            ) : (
+              <button type="button" disabled={busy === "approval" || loading !== null} onClick={() => void decide("reject")}>
+                <X size={16} />
+                {loading === "reject" ? "Requesting..." : "Request changes"}
+              </button>
+            )}
           </div>
         </>
       ) : (

@@ -9,10 +9,10 @@ export function StatusBadge({ status }: StatusBadgeProps) {
 
 function classNameForStatus(status: string): string {
   if (status.startsWith("awaiting_")) return "status-badge--awaiting";
-  if (["executing", "validating", "reviewing", "committing", "routing", "planning"].includes(status)) return "status-badge--active";
+  if (["executing", "executing_correction", "validating", "validating_correction", "reviewing", "committing", "routing", "planning", "classifying_correction"].includes(status)) return "status-badge--active";
   if (status === "closed") return "status-badge--closed";
   if (status === "failed" || status === "validation_failed") return "status-badge--failed";
   if (status === "cancelled") return "status-badge--cancelled";
-  if (status === "changes_requested" || status === "plan_rejected" || status === "prompt_too_large") return "status-badge--changes";
+  if (status === "changes_requested" || status === "plan_rejected" || status === "prompt_too_large" || status === "correction_blocked") return "status-badge--changes";
   return "status-badge--neutral";
 }

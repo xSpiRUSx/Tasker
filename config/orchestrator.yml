@@ -64,6 +64,23 @@ approvals:
   require_diff_approval: true
   require_commit_approval: true
 
+corrections:
+  default_action_for_diff_comments: "request_changes_and_run"
+  comment_is_execution_approval: true
+  skip_full_replanning_when:
+    - source_gate == "diff"
+    - task_has_approved_plan == true
+    - correction_within_existing_scope == true
+    - no_blocked_paths_touched == true
+    - no_config_change == true
+    - no_security_or_role_change == true
+  require_spec_addendum_when:
+    - changes_business_rule == true
+    - touches_config == true
+    - touches_security_or_roles == true
+    - touches_deploy_or_migrations == true
+    - changes_public_contract == true
+
 web:
   cors_origins:
     - "http://127.0.0.1:5173"

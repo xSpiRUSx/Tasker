@@ -26,6 +26,12 @@ TaskStatus = Literal[
     "validation_failed",
     "awaiting_diff_approval",
     "changes_requested",
+    "correction_requested",
+    "classifying_correction",
+    "executing_correction",
+    "validating_correction",
+    "awaiting_correction_diff_approval",
+    "correction_blocked",
     "awaiting_commit_approval",
     "approved_for_commit",
     "committing",
@@ -64,6 +70,8 @@ ArtifactKind = Literal[
     "repair_prompt",
     "correction_request",
     "correction_context",
+    "correction_result",
+    "spec_addendum",
     "diagnosis",
     "diff_summary",
     "diff_patch",
@@ -160,6 +168,38 @@ class AgentRun(BaseModel):
     finished_at: datetime | None = None
     iteration_count: int = 0
     stop_reason: str | None = None
+    correction_request_id: str | None = None
+
+
+CorrectionMode = Literal["micro_correction", "minor_correction", "spec_addendum", "new_task"]
+CorrectionAction = Literal["run_without_new_plan", "show_plan_first"]
+
+
+class CorrectionRequest(BaseModel):
+    id: str
+    task_id: str
+    source_gate: str
+    source_approval_id: str | None = None
+    source_artifact_id: str | None = None
+    user_comment: str
+    mode: CorrectionMode
+    status: str
+    approved_for_execution: bool
+    requires_plan_approval: bool
+    requires_spec_addendum: bool
+    classifier_result: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
+class CorrectionClassifierResult(BaseModel):
+    mode: CorrectionMode
+    requires_new_spec: bool = False
+    requires_plan_approval: bool = False
+    requires_spec_addendum: bool = False
+    approved_for_execution: bool = True
+    reason: str
+    risk_flags: list[str] = Field(default_factory=list)
 
 
 class AgentStep(BaseModel):
@@ -231,6 +271,23 @@ class JobAcceptedResponse(BaseModel):
 class ApprovalDecisionRequest(BaseModel):
     decision: Literal["approve", "reject"]
     comment: str | None = None
+
+
+class CreateCorrectionRequest(BaseModel):
+    source_gate: str = "diff"
+    source_approval_id: str | None = None
+    source_artifact_id: str | None = None
+    comment: str
+    action: CorrectionAction = "run_without_new_plan"
+
+
+class CreateCorrectionResponse(BaseModel):
+    correction_id: str
+    mode: CorrectionMode
+    status: str
+    approved_for_execution: bool
+    requires_plan_approval: bool
+    requires_spec_addendum: bool
 
 
 class ContinueTaskRequest(BaseModel):

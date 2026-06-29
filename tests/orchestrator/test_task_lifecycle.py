@@ -3,7 +3,7 @@ from pathlib import Path
 import subprocess
 
 from engineering_orchestrator.api import Orchestrator
-from engineering_orchestrator.models import ApprovalDecisionRequest, ContinueTaskRequest, CreateTaskRequest
+from engineering_orchestrator.models import ApprovalDecisionRequest, ContinueTaskRequest, CreateCorrectionRequest, CreateTaskRequest
 from engineering_orchestrator.settings import Settings
 
 
@@ -158,7 +158,7 @@ def test_reject_plan_and_message_creates_v2_plan(tmp_path):
     assert approval.requested_payload["plan_version"] == 2
 
 
-def test_reject_diff_creates_correction_request_and_vnext_plan(tmp_path):
+def test_reject_diff_creates_correction_request_and_runs_without_vnext_plan(tmp_path):
     orchestrator = Orchestrator(make_settings(tmp_path))
     response = orchestrator.create_task(CreateTaskRequest(message="Fix billing-api login bug"))
 
@@ -171,12 +171,67 @@ def test_reject_diff_creates_correction_request_and_vnext_plan(tmp_path):
         ApprovalDecisionRequest(decision="reject", comment="Limit the diff to auth.py"),
     )
 
+    assert task.status == "awaiting_correction_diff_approval"
+    assert orchestrator.task_store.get_artifact(task.id, "correction_request", version=1) is not None
+    assert orchestrator.task_store.get_artifact(task.id, "correction_context", version=1) is not None
+    assert orchestrator.task_store.get_artifact(task.id, "correction_result", version=1) is not None
+    assert orchestrator.task_store.get_artifact(task.id, "todo", version=2) is None
+    assert orchestrator.task_store.get_artifact(task.id, "approval_request", version=2) is None
+    correction = orchestrator.task_store.list_correction_requests(task.id)[0]
+    assert correction.mode == "micro_correction"
+    assert correction.approved_for_execution is True
+    approval = orchestrator.task_store.get_pending_approval(task.id, "diff")
+    assert approval is not None
+    assert approval.requested_payload["correction_request_id"] == "correction-001"
+
+
+def test_spec_changing_correction_creates_addendum_and_plan_approval(tmp_path):
+    orchestrator = Orchestrator(make_settings(tmp_path))
+    response = orchestrator.create_task(CreateTaskRequest(message="Fix billing-api login bug"))
+    task = orchestrator.decide_approval(response.task_id, "plan", ApprovalDecisionRequest(decision="approve"))
+    diff_approval = orchestrator.task_store.get_pending_approval(task.id, "diff")
+
+    response_payload = orchestrator.create_correction(
+        task.id,
+        CreateCorrectionRequest(
+            source_gate="diff",
+            source_approval_id=diff_approval.id,
+            comment="Change the business rule for login status calculation.",
+            action="run_without_new_plan",
+        ),
+    )
+
+    task = orchestrator.task_store.get_task(task.id)
+    assert response_payload.mode == "spec_addendum"
+    assert response_payload.requires_plan_approval is True
     assert task.status == "awaiting_plan_approval"
-    assert orchestrator.task_store.get_artifact(task.id, "correction_request", version=2) is not None
-    assert orchestrator.task_store.get_artifact(task.id, "todo", version=2) is not None
+    assert orchestrator.task_store.get_artifact(task.id, "spec_addendum", version=1) is not None
+    assert orchestrator.task_store.get_artifact(task.id, "todo", version=2) is None
     approval = orchestrator.task_store.get_pending_approval(task.id, "plan")
     assert approval is not None
-    assert approval.requested_payload["plan_version"] == 2
+    assert approval.requested_payload["correction_request_id"] == "correction-001"
+
+
+def test_config_or_security_correction_blocks_fast_path(tmp_path):
+    orchestrator = Orchestrator(make_settings(tmp_path))
+    response = orchestrator.create_task(CreateTaskRequest(message="Fix billing-api login bug"))
+    task = orchestrator.decide_approval(response.task_id, "plan", ApprovalDecisionRequest(decision="approve"))
+    diff_approval = orchestrator.task_store.get_pending_approval(task.id, "diff")
+
+    response_payload = orchestrator.create_correction(
+        task.id,
+        CreateCorrectionRequest(
+            source_gate="diff",
+            source_approval_id=diff_approval.id,
+            comment="Also update security roles and config for this patch.",
+            action="run_without_new_plan",
+        ),
+    )
+
+    assert response_payload.mode == "spec_addendum"
+    assert response_payload.approved_for_execution is False
+    assert response_payload.requires_spec_addendum is True
+    assert orchestrator.task_store.get_pending_approval(task.id, "plan") is not None
 
 
 def test_1c_validation_without_validator_is_skipped_manual_review(tmp_path):

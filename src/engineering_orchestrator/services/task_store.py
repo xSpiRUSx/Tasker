@@ -12,6 +12,7 @@ from engineering_orchestrator.models import (
     AgentStep,
     Approval,
     ApprovalStatus,
+    CorrectionRequest,
     EvaluationResult,
     Task,
     TaskArtifact,
@@ -136,6 +137,25 @@ class TaskStore:
                   finished_at TEXT,
                   iteration_count INTEGER NOT NULL DEFAULT 0,
                   stop_reason TEXT,
+                  correction_request_id TEXT,
+                  FOREIGN KEY(task_id) REFERENCES tasks(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS correction_requests (
+                  id TEXT PRIMARY KEY,
+                  task_id TEXT NOT NULL,
+                  source_gate TEXT NOT NULL,
+                  source_approval_id TEXT,
+                  source_artifact_id TEXT,
+                  user_comment TEXT NOT NULL,
+                  mode TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  approved_for_execution INTEGER NOT NULL,
+                  requires_plan_approval INTEGER NOT NULL,
+                  requires_spec_addendum INTEGER NOT NULL,
+                  classifier_result_json TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
                   FOREIGN KEY(task_id) REFERENCES tasks(id)
                 );
 
@@ -168,6 +188,12 @@ class TaskStore:
                 );
                 """
             )
+            self._ensure_column(conn, "agent_runs", "correction_request_id", "TEXT")
+
+    def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def next_task_id(self, prefix: str) -> str:
         year = utc_now().year
@@ -456,6 +482,104 @@ class TaskStore:
             ).fetchall()
         return [self._row_to_approval(row) for row in rows]
 
+    def next_correction_number(self, task_id: str) -> int:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS count FROM correction_requests WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return int(row["count"]) + 1
+
+    def create_correction_request(
+        self,
+        task_id: str,
+        source_gate: str,
+        user_comment: str,
+        mode: str,
+        status: str,
+        approved_for_execution: bool,
+        requires_plan_approval: bool,
+        requires_spec_addendum: bool,
+        classifier_result: dict[str, Any],
+        source_approval_id: str | None = None,
+        source_artifact_id: str | None = None,
+    ) -> CorrectionRequest:
+        now = utc_now()
+        correction = CorrectionRequest(
+            id=f"correction-{self.next_correction_number(task_id):03d}",
+            task_id=task_id,
+            source_gate=source_gate,
+            source_approval_id=source_approval_id,
+            source_artifact_id=source_artifact_id,
+            user_comment=user_comment,
+            mode=mode,  # type: ignore[arg-type]
+            status=status,
+            approved_for_execution=approved_for_execution,
+            requires_plan_approval=requires_plan_approval,
+            requires_spec_addendum=requires_spec_addendum,
+            classifier_result=classifier_result,
+            created_at=now,
+            updated_at=now,
+        )
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO correction_requests (
+                  id, task_id, source_gate, source_approval_id, source_artifact_id,
+                  user_comment, mode, status, approved_for_execution,
+                  requires_plan_approval, requires_spec_addendum,
+                  classifier_result_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    correction.id,
+                    correction.task_id,
+                    correction.source_gate,
+                    correction.source_approval_id,
+                    correction.source_artifact_id,
+                    correction.user_comment,
+                    correction.mode,
+                    correction.status,
+                    1 if correction.approved_for_execution else 0,
+                    1 if correction.requires_plan_approval else 0,
+                    1 if correction.requires_spec_addendum else 0,
+                    _json(correction.classifier_result),
+                    correction.created_at.isoformat(),
+                    correction.updated_at.isoformat(),
+                ),
+            )
+        return correction
+
+    def update_correction_request_status(self, correction_id: str, status: str) -> CorrectionRequest:
+        updated_at = utc_now()
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE correction_requests SET status = ?, updated_at = ? WHERE id = ?",
+                (status, updated_at.isoformat(), correction_id),
+            )
+            row = conn.execute("SELECT * FROM correction_requests WHERE id = ?", (correction_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"Correction request not found: {correction_id}")
+        return self._row_to_correction_request(row)
+
+    def get_correction_request(self, task_id: str, correction_id: str) -> CorrectionRequest:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM correction_requests WHERE task_id = ? AND id = ?",
+                (task_id, correction_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"Correction request not found: {correction_id}")
+        return self._row_to_correction_request(row)
+
+    def list_correction_requests(self, task_id: str) -> list[CorrectionRequest]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM correction_requests WHERE task_id = ? ORDER BY created_at, id",
+                (task_id,),
+            ).fetchall()
+        return [self._row_to_correction_request(row) for row in rows]
+
     def get_current_approval_gate(self, task_id: str) -> str | None:
         with self.connect() as conn:
             row = conn.execute(
@@ -574,6 +698,7 @@ class TaskStore:
         status: str = "running",
         executor: str | None = None,
         model: str | None = None,
+        correction_request_id: str | None = None,
     ) -> AgentRun:
         run = AgentRun(
             id=new_id("run"),
@@ -583,14 +708,15 @@ class TaskStore:
             executor=executor,
             model=model,
             started_at=utc_now(),
+            correction_request_id=correction_request_id,
         )
         with self.connect() as conn:
             conn.execute(
                 """
                 INSERT INTO agent_runs (
                   id, task_id, run_type, status, executor, model, started_at,
-                  finished_at, iteration_count, stop_reason
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  finished_at, iteration_count, stop_reason, correction_request_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run.id,
@@ -603,6 +729,7 @@ class TaskStore:
                     None,
                     run.iteration_count,
                     run.stop_reason,
+                    run.correction_request_id,
                 ),
             )
         return run
@@ -894,6 +1021,25 @@ class TaskStore:
             finished_at=_dt(row["finished_at"]),
             iteration_count=row["iteration_count"],
             stop_reason=row["stop_reason"],
+            correction_request_id=row["correction_request_id"] if "correction_request_id" in row.keys() else None,
+        )
+
+    def _row_to_correction_request(self, row: sqlite3.Row) -> CorrectionRequest:
+        return CorrectionRequest(
+            id=row["id"],
+            task_id=row["task_id"],
+            source_gate=row["source_gate"],
+            source_approval_id=row["source_approval_id"],
+            source_artifact_id=row["source_artifact_id"],
+            user_comment=row["user_comment"],
+            mode=row["mode"],
+            status=row["status"],
+            approved_for_execution=bool(row["approved_for_execution"]),
+            requires_plan_approval=bool(row["requires_plan_approval"]),
+            requires_spec_addendum=bool(row["requires_spec_addendum"]),
+            classifier_result=json.loads(row["classifier_result_json"]),
+            created_at=_dt(row["created_at"]),
+            updated_at=_dt(row["updated_at"]),
         )
 
     def _row_to_step(self, row: sqlite3.Row) -> AgentStep:

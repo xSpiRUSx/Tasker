@@ -73,3 +73,26 @@ def test_codex_prompt_truncates_large_allowed_artifacts(tmp_path):
 
     assert "[Artifact truncated before sending to Codex executor." in prompt
     assert len(prompt) < len(large_content) + 2000
+
+
+def test_codex_correction_prompt_uses_compact_correction_artifacts(tmp_path):
+    (tmp_path / "task").mkdir()
+    (tmp_path / "task" / "12-correction-001.md").write_text("remove helper procedures", encoding="utf-8")
+    (tmp_path / "task" / "12-correction-001-context.md").write_text("allowed files: auth.py", encoding="utf-8")
+    (tmp_path / "task" / "07-executor-stdout.md").write_text("old stdout " * 1000, encoding="utf-8")
+
+    executor = CodexExecutor(tmp_path)
+    prompt = executor._build_prompt(
+        make_task(),
+        [
+            make_artifact("correction_request", "task/12-correction-001.md", version=1),
+            make_artifact("correction_context", "task/12-correction-001-context.md", version=1),
+            make_artifact("executor_stdout", "task/07-executor-stdout.md"),
+        ],
+    )
+
+    assert "You are applying a user-requested correction" in prompt
+    assert "remove helper procedures" in prompt
+    assert "allowed files: auth.py" in prompt
+    assert "old stdout" not in prompt
+    assert "Implement the approved plan" not in prompt

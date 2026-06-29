@@ -45,6 +45,9 @@ export function CorrectionPanel({ busy, onCorrection, task }: CorrectionPanelPro
 
 function actionLabel(status: string) {
   if (status === "changes_requested") return "Create a correction plan from the requested changes.";
+  if (status === "executing_correction" || status === "validating_correction") return "Applying requested changes.";
+  if (status === "awaiting_correction_diff_approval") return "Review the updated diff after the requested correction.";
+  if (status === "correction_blocked") return "Correction blocked; send a narrower request or ask to create a linked task.";
   if (status === "validation_failed") return "Send validation notes and generate a focused repair plan.";
   if (status === "prompt_too_large") return "Ask Tasker to compact context before retrying execution.";
   if (status === "plan_rejected") return "Revise the rejected plan with a concrete correction request.";
@@ -54,12 +57,14 @@ function actionLabel(status: string) {
 function placeholderFor(status: string) {
   if (status === "prompt_too_large") return "Compact context and retry execution with only the latest approved artifacts.";
   if (status === "changes_requested") return "Create correction plan from my comments: ...";
+  if (status === "correction_blocked") return "Narrow correction to the reviewed diff: ...";
   if (status === "validation_failed") return "Repair validation failure: ...";
   return "Message to task / correction request";
 }
 
 function buttonLabel(status: string) {
   if (status === "changes_requested") return "Create correction plan";
+  if (status === "correction_blocked") return "Send correction";
   if (status === "validation_failed") return "Retry with repair plan";
   if (status === "prompt_too_large") return "Compact context";
   return "Send message";

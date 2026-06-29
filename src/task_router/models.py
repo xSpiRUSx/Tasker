@@ -93,6 +93,7 @@ class WorkflowConfig(BaseModel):
     requires_review: bool = False
     requires_config_approval: bool = False
     requires_deploy_prep: bool = False
+    use_worktree: bool = False
     approval_gates: list[ApprovalGate] = Field(default_factory=list)
     risk_flags: list[str] = Field(default_factory=list)
     allowed_change_types: list[str] = Field(default_factory=list)

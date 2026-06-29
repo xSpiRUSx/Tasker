@@ -261,6 +261,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @app.get("/tasks/{task_id}/model-calls")
+    def list_model_calls(task_id: str):
+        try:
+            return {"items": orchestrator.list_model_calls(task_id)}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.get("/tasks/{task_id}/prompt-builds")
     def list_prompt_builds(task_id: str):
         try:

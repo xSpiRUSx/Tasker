@@ -1,0 +1,76 @@
+- id: rule-490cdc87e2c9-positive-1
+  input: "нужны правки в 00001: query fails on temp table"
+  expected:
+    route_type: linked_correction
+
+- id: rule-490cdc87e2c9-negative-1
+  input: "покажи задачу 00011"
+  expected:
+    not_route_type: linked_correction
+
+- id: rule-490cdc87e2c9-negative-2
+  input: "что было в задаче 00011?"
+  expected:
+    not_route_type: linked_correction
+
+- id: rule-490cdc87e2c9-negative-3
+  input: "закрой задачу 00011"
+  expected:
+    not_route_type: linked_correction
+- id: rule-318529f83e9d-positive-1
+  input: "нужны правки в 00001: query fails on temp table"
+  expected:
+    route_type: linked_correction
+
+- id: rule-318529f83e9d-negative-1
+  input: "покажи задачу 00011"
+  expected:
+    not_route_type: linked_correction
+
+- id: rule-318529f83e9d-negative-2
+  input: "что было в задаче 00011?"
+  expected:
+    not_route_type: linked_correction
+
+- id: rule-318529f83e9d-negative-3
+  input: "закрой задачу 00011"
+  expected:
+    not_route_type: linked_correction
+- id: rule-fd59fe950045-positive-1
+  input: "нужны правки в 00001: query fails on temp table"
+  expected:
+    route_type: linked_correction
+
+- id: rule-fd59fe950045-negative-1
+  input: "покажи задачу 00011"
+  expected:
+    not_route_type: linked_correction
+
+- id: rule-fd59fe950045-negative-2
+  input: "что было в задаче 00011?"
+  expected:
+    not_route_type: linked_correction
+
+- id: rule-fd59fe950045-negative-3
+  input: "закрой задачу 00011"
+  expected:
+    not_route_type: linked_correction
+- id: rule-7125f4ebb40b-positive-1
+  input: "нужны правки в 00001: query fails on temp table"
+  expected:
+    route_type: linked_correction
+
+- id: rule-7125f4ebb40b-negative-1
+  input: "покажи задачу 00011"
+  expected:
+    not_route_type: linked_correction
+
+- id: rule-7125f4ebb40b-negative-2
+  input: "что было в задаче 00011?"
+  expected:
+    not_route_type: linked_correction
+
+- id: rule-7125f4ebb40b-negative-3
+  input: "закрой задачу 00011"
+  expected:
+    not_route_type: linked_correction

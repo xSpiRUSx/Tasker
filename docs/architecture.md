@@ -85,8 +85,9 @@ The executor is selected by `execution.default_executor` or
 `ORCHESTRATOR_DEFAULT_EXECUTOR`.
 
 - `mock` records lifecycle artifacts without changing project files.
-- `codex` creates a git worktree, runs `codex exec` inside it, records changed
-  files, and writes diff artifacts for review.
+- `codex` creates a git worktree only when the selected workflow has
+  `use_worktree: true`, runs `codex exec` inside it, records changed files, and
+  writes diff artifacts for review.
 
 Question-only workflows stop after route and context collection. They write an
 answer artifact and final report, then close without approval gates.

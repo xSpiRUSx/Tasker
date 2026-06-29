@@ -164,7 +164,8 @@ Quick workflow:
 The unified app uses YAML files under the root `config` directory:
 
 - `config/projects.yml` - project registry, aliases, paths, and tools.
-- `config/workflows.yml` - workflow eligibility, required gates, and steps.
+- `config/workflows.yml` - workflow eligibility, required gates, worktree
+  policy, and steps.
 - `config/orchestrator.yml` - storage, artifact, approval, router, execution,
   and validation settings.
 - `config/model_policy.yml` - model targets, runtime routes, reasoning effort,
@@ -202,8 +203,7 @@ If Codex planning fails, Tasker falls back to the mock planner and records a
 planner warning in the approval artifact.
 
 Execution is separate. By default the lifecycle uses the safe `mock` executor.
-To let approved tasks create a git worktree and run Codex CLI there, start the
-server with:
+To let approved tasks run Codex CLI, start the server with:
 
 ```powershell
 $env:ORCHESTRATOR_DEFAULT_EXECUTOR = "codex"
@@ -212,13 +212,17 @@ engineering-assistant --port 8001
 
 In `codex` mode, approving the `plan` gate will:
 
-- create a git worktree under `data/worktrees`;
+- create a git worktree under `data/worktrees` only when the selected workflow
+  has `use_worktree: true`;
 - run `codex exec` in that worktree using the approved task artifacts;
 - write execution, validation, review, diff summary, and patch artifacts into
   the Obsidian task folder;
 - request a separate `commit` approval after diff approval.
 
-The selected `project_path` must be a git repository.
+Worktree creation is disabled by default for workflows. Add
+`use_worktree: true` to specific workflow entries in `config/workflows.yml`
+when the workflow should execute in an isolated git worktree. The selected
+`project_path` must be a git repository for those workflows.
 
 For risky routes, pre-execution gates such as `spec`, `config_change`,
 `migration`, `security_change`, and `deploy_prep` are requested after plan

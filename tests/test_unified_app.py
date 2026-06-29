@@ -157,6 +157,43 @@ def test_unified_tasks_endpoint_uses_router_decision(tmp_path):
     assert [step["step_type"] for step in steps_response.json()] == ["execute", "validate", "observe", "evaluate"]
 
 
+def test_unified_model_calls_endpoint_returns_token_usage(tmp_path):
+    app = create_app(make_settings(tmp_path))
+    client = TestClient(app)
+    response = client.post("/tasks", json={"message": "Fix billing-api login bug"})
+    task_id = response.json()["task_id"]
+    app.state.orchestrator.task_store.add_model_call(
+        task_id,
+        "run-1",
+        "execute_code",
+        "codex_cli",
+        "gpt-5.5",
+        provider="codex-estimated",
+        prompt_chars=1200,
+        prompt_tokens=300,
+        completion_tokens=25,
+        cached_prompt_tokens=100,
+        reasoning_tokens=7,
+        total_tokens=325,
+        usage_source="test_usage",
+        usage_is_estimated=False,
+        status="success",
+    )
+
+    calls_response = client.get(f"/tasks/{task_id}/model-calls")
+
+    assert calls_response.status_code == 200
+    payload = calls_response.json()
+    assert payload["items"][0]["model"] == "gpt-5.5"
+    assert payload["items"][0]["prompt_tokens"] == 300
+    assert payload["items"][0]["completion_tokens"] == 25
+    assert payload["items"][0]["cached_prompt_tokens"] == 100
+    assert payload["items"][0]["reasoning_tokens"] == 7
+    assert payload["items"][0]["total_tokens"] == 325
+    assert payload["items"][0]["usage_source"] == "test_usage"
+    assert payload["items"][0]["usage_is_estimated"] is False
+
+
 def test_unified_task_cancel_and_cors(tmp_path):
     client = TestClient(create_app(make_settings(tmp_path)))
     response = client.post(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,8 @@ FILENAME_BY_KIND: dict[str, str] = {
     "final_report": "13-final-report.md",
     "events": "events.md",
 }
+
+MAX_EVENT_LINE_CHARS = 2000
 
 
 NON_VERSIONED_ARTIFACT_KINDS: set[str] = {
@@ -122,9 +125,17 @@ def sha256_text(text: str) -> str:
 
 
 class ArtifactStore:
-    def __init__(self, root_path: str | Path, task_folder_template: str = "{task_id} - {project_id} - {slug_short}"):
+    def __init__(
+        self,
+        root_path: str | Path,
+        task_folder_template: str = "{task_id} - {project_id} - {slug_short}",
+        write_retry_attempts: int = 5,
+        write_retry_delay_seconds: float = 0.1,
+    ):
         self.root_path = Path(root_path)
         self.task_folder_template = task_folder_template
+        self.write_retry_attempts = max(1, write_retry_attempts)
+        self.write_retry_delay_seconds = max(0.0, write_retry_delay_seconds)
         self.root_path.mkdir(parents=True, exist_ok=True)
 
     def create_task_folder(self, task: Task, slug: str) -> str:
@@ -268,14 +279,25 @@ See [[events]].
             if existing.startswith("---"):
                 parts = existing.split("---", 2)
                 existing = parts[2].lstrip() if len(parts) == 3 else existing
-            event_lines = [line for line in existing.splitlines() if line.startswith("- `")]
-        line = f"- `{event.created_at.isoformat()}` **{event.event_type}** {event.payload}\n"
+            event_lines = [self._trim_event_line(line) for line in existing.splitlines() if line.startswith("- `")]
+        payload = self._event_payload_preview(event.payload)
+        line = f"- `{event.created_at.isoformat()}` **{event.event_type}** {payload}\n"
         event_lines.append(line.rstrip())
         omitted = max(0, len(event_lines) - 50)
         event_lines = event_lines[-50:]
         summary = f"_Showing latest 50 events. {omitted} older event(s) are stored in SQLite._\n\n" if omitted else ""
         content = "# Events\n\n" + summary + "\n".join(event_lines) + "\n"
         return self.write_markdown(task, "events", "Events", content, filename="events.md")
+
+    def _event_payload_preview(self, payload: dict[str, Any]) -> str:
+        text = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+        return self._trim_event_line(text)
+
+    def _trim_event_line(self, line: str) -> str:
+        if len(line) <= MAX_EVENT_LINE_CHARS:
+            return line
+        omitted = len(line) - MAX_EVENT_LINE_CHARS
+        return f"{line[:MAX_EVENT_LINE_CHARS].rstrip()}... [truncated {omitted} chars]"
 
     def _with_frontmatter(
         self,
@@ -326,7 +348,22 @@ See [[events]].
     def _atomic_write(self, path: Path, text: str) -> None:
         temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
         temp_path.write_text(text, encoding="utf-8", newline="\n")
-        temp_path.replace(path)
+        for attempt in range(1, self.write_retry_attempts + 1):
+            try:
+                temp_path.replace(path)
+                return
+            except OSError as exc:
+                if attempt >= self.write_retry_attempts or not self._is_retryable_replace_error(exc):
+                    try:
+                        temp_path.unlink(missing_ok=True)
+                    finally:
+                        raise
+                time.sleep(self.write_retry_delay_seconds * attempt)
+
+    def _is_retryable_replace_error(self, exc: OSError) -> bool:
+        if isinstance(exc, PermissionError):
+            return True
+        return getattr(exc, "winerror", None) in {5, 32}
 
     def _title_from_task(self, task: Task) -> str:
         return task.user_message.splitlines()[0][:100]

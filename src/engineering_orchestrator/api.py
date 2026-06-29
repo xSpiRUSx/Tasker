@@ -15,6 +15,7 @@ from engineering_orchestrator.corrections import LinkedTaskDetectionResult, Link
 from engineering_orchestrator.harness import ContextBuilder, PromptBuilder
 from engineering_orchestrator.llm import ModelPolicy, ModelSelectionRequest, ModelSelector, PromptBudgeter
 from engineering_orchestrator.llm.prompt_budgeter import PromptBudgetError
+from engineering_orchestrator.llm.token_usage import estimate_token_usage, parse_codex_cli_token_usage
 from engineering_orchestrator.loop import Evaluator, LoopPolicy, Observer, RepairPlanner
 from engineering_orchestrator.models import (
     ApprovalDecisionRequest,
@@ -257,9 +258,45 @@ class Orchestrator:
         self.task_store.get_task(task_id)
         return self.task_store.list_model_decisions(task_id)
 
+    def list_model_calls(self, task_id: str):
+        self.task_store.get_task(task_id)
+        return self.task_store.list_model_calls(task_id)
+
     def list_prompt_builds(self, task_id: str):
         self.task_store.get_task(task_id)
         return self.task_store.list_prompt_builds(task_id)
+
+    def _record_executor_model_call(self, task: Task, run_id: str, prompt_bundle, decision, result) -> None:
+        if self.settings.default_executor in {"", "none", "mock"}:
+            return
+        if decision.runtime in {"", "none", "mock", "deterministic"}:
+            return
+        if decision.model in {"", "none", "mock"}:
+            return
+        usage = parse_codex_cli_token_usage(result.stdout, result.stderr)
+        provider = self.settings.default_executor
+        if usage is None:
+            usage = estimate_token_usage(prompt_bundle.total_chars, len(result.stdout or ""))
+            provider = f"{self.settings.default_executor}-estimated"
+        self.task_store.add_model_call(
+            task.id,
+            run_id,
+            prompt_bundle.operation,
+            decision.runtime,
+            decision.model,
+            provider=provider,
+            reasoning_effort=decision.reasoning_effort,
+            prompt_chars=prompt_bundle.total_chars,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            cached_prompt_tokens=usage.cached_prompt_tokens,
+            reasoning_tokens=usage.reasoning_tokens,
+            total_tokens=usage.total_tokens,
+            usage_source=usage.source,
+            usage_is_estimated=usage.is_estimated,
+            status=result.status,
+            error=result.summary if result.status != "success" else None,
+        )
 
     def route_adaptive(self, message: str, context: RoutingContext | dict[str, Any] | None = None) -> AdaptiveRoutingDecision:
         routing_context = context if isinstance(context, RoutingContext) else RoutingContext(**(context or {}))
@@ -435,6 +472,8 @@ class Orchestrator:
         findings: list[str] = []
         if task.status.startswith("awaiting_") and self.task_store.get_current_approval_gate(task.id) is None:
             findings.append("awaiting status has no pending approval")
+            if task.status == "awaiting_diff_reapproval":
+                task = self._request_diff_reapproval(task, "awaiting_diff_reapproval had no pending diff approval")
         if task.status in {"executing", "planning", "executing_correction"}:
             active = [job for job in self.task_store.list_jobs(task.id) if job.status in {"queued", "running"}]
             if not active:
@@ -1936,7 +1975,14 @@ Awaiting updated diff approval.
             self._add_event(task, "approved_for_execution", {"run_id": run.id})
 
         if self.settings.default_executor == "codex" and not task.worktree_path:
-            task = self._prepare_worktree(task)
+            if self._workflow_uses_worktree(task):
+                task = self._prepare_worktree(task)
+            else:
+                self._add_event(
+                    task,
+                    "worktree_skipped",
+                    {"workflow_id": task.workflow_id, "reason": "workflow_policy_disabled"},
+                )
         if self.settings.default_executor == "codex":
             self._write_executor_policy(task)
 
@@ -1981,8 +2027,9 @@ Awaiting updated diff approval.
             prompt_bundle=prompt_bundle,
             model_decision=decision,
         )
+        self._record_executor_model_call(task, run.id, prompt_bundle, decision, result)
         self._write_executor_result_artifacts(task, result, run.id)
-        self._add_event(task, "execution_completed", result.model_dump())
+        self._add_event(task, "execution_completed", self._execution_event_payload(result))
 
         if result.status != "success":
             execution = self.artifact_store.write_markdown(
@@ -2339,6 +2386,13 @@ Awaiting updated diff approval.
         self._add_event(task, "worktree_created", {"path": task.worktree_path, "branch": task.branch_name})
         return task
 
+    def _workflow_uses_worktree(self, task: Task) -> bool:
+        workflow = self.workflows.get(task.workflow_id or "") or {}
+        value = workflow.get("use_worktree", False)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
     def _execution_markdown(self, task: Task, result) -> str:
         return f"""# Execution
 
@@ -2418,6 +2472,19 @@ Status: `{result.status}`
             self._write_runtime_file(task, run_id, "executor-stdout.log", result.stdout)
         if result.stderr or self.settings.default_executor == "codex":
             self._write_runtime_file(task, run_id, "executor-stderr.log", result.stderr)
+
+    def _execution_event_payload(self, result) -> dict[str, Any]:
+        return {
+            "status": result.status,
+            "summary": result.summary,
+            "changed_files": result.changed_files,
+            "command": result.command,
+            "timed_out": result.timed_out,
+            "prompt_chars": len(result.prompt or ""),
+            "stdout_chars": len(result.stdout or ""),
+            "stderr_chars": len(result.stderr or ""),
+            "logs_chars": len(result.logs or ""),
+        }
 
     def _runtime_dir(self, task: Task, run_id: str) -> Path:
         runtime_root = self.settings.runtime_root or self.settings.artifacts_root.parent / "runtime"
@@ -2699,7 +2766,9 @@ Status: `{result.status}`
         )
         guard_error = self._commit_guard_error(task)
         if guard_error:
-            task.status = "awaiting_diff_reapproval" if "diff" in guard_error else "changes_requested"
+            if "diff" in guard_error:
+                return self._request_diff_reapproval(task, guard_error)
+            task.status = "changes_requested"
             self.task_store.update_task(task)
             self._add_event(task, "commit_blocked", {"reason": guard_error})
             blocked = self.artifact_store.write_markdown(
@@ -2709,7 +2778,7 @@ Status: `{result.status}`
                 f"# Commit result\n\nCommit blocked: {guard_error}\n",
             )
             self.task_store.add_artifact(blocked)
-            self._write_index(self.task_store.get_task(task.id), "Commit blocked; diff must be reviewed again.")
+            self._write_index(self.task_store.get_task(task.id), "Commit blocked; changes were requested.")
             return self.task_store.get_task(task.id)
         task.status = "approved_for_commit"
         self.task_store.update_task(task)
@@ -2750,6 +2819,79 @@ Status: `{result.status}`
             self._write_index(self.task_store.get_task(task.id), "Task is closed.")
         else:
             self._write_index(self.task_store.get_task(task.id), "Commit failed.")
+        return self.task_store.get_task(task.id)
+
+    def _request_diff_reapproval(self, task: Task, reason: str) -> Task:
+        task.status = "awaiting_diff_reapproval"
+        self.task_store.update_task(task)
+        self._add_event(task, "commit_blocked", {"reason": reason})
+
+        changed_files: list[str] = []
+        diff_text = ""
+        diff_stat = "No source files were modified."
+        diff_patch = None
+        if task.worktree_path:
+            try:
+                worktree = Path(task.worktree_path)
+                self.git_service.diff_check(worktree)
+                changed_files = self.git_service.changed_files(worktree)
+                diff_text = self.git_service.diff_patch(worktree)
+                diff_stat = self.git_service.diff_stat(worktree).strip() or diff_stat
+                if diff_text.strip():
+                    diff_patch = self.artifact_store.write_markdown(
+                        task,
+                        "diff_patch",
+                        "Diff patch",
+                        diff_text,
+                        filename="10-diff.patch",
+                        include_frontmatter=False,
+                    )
+                    self.task_store.add_artifact(diff_patch)
+            except Exception as exc:
+                diff_stat = f"Could not collect git diff for reapproval: {exc}"
+
+        blocked = self.artifact_store.write_markdown(
+            task,
+            "commit_result",
+            "Commit result",
+            f"# Commit result\n\nCommit blocked: {reason}\n\nA fresh diff approval has been requested.\n",
+        )
+        diff_summary = self.artifact_store.write_markdown(
+            task,
+            "diff_summary",
+            "Diff reapproval",
+            "# Diff reapproval\n\n"
+            f"Commit blocked: `{reason}`\n\n"
+            "## Changed files\n\n"
+            f"{self._bullet_list(changed_files)}\n\n"
+            "## Diff stat\n\n"
+            f"```text\n{diff_stat}\n```",
+        )
+        self.task_store.add_artifact(blocked)
+        self.task_store.add_artifact(diff_summary)
+
+        approval_artifacts = [blocked.id, diff_summary.id]
+        if diff_patch is not None:
+            approval_artifacts.append(diff_patch.id)
+        pending = self.task_store.get_pending_approval(task.id, "diff")
+        if pending is None:
+            pending = self.task_store.create_approval(
+                task.id,
+                "diff",
+                approval_artifacts,
+                {
+                    "approves": ["commit gate", "close task"],
+                    "reviewed_files": changed_files,
+                    "approved_diff_hash": self._text_hash(diff_text),
+                    "approved_changed_files_hash": self._json_hash(sorted(changed_files)),
+                    "approved_diff_stat_hash": self._text_hash(diff_stat),
+                    "approved_diff_artifact_id": diff_patch.id if diff_patch is not None else None,
+                    "reapproval_reason": reason,
+                },
+            )
+            self._add_event(task, "diff_reapproval_requested", {"approval_id": pending.id, "reason": reason})
+
+        self._write_index(self.task_store.get_task(task.id), "Commit blocked; pending fresh diff approval.")
         return self.task_store.get_task(task.id)
 
     def _commit_message(self, task: Task) -> str:
@@ -2798,7 +2940,7 @@ Status: `{result.status}`
             self.git_service.diff_check(worktree)
             current_files = self.git_service.changed_files(worktree)
             current_diff = self.git_service.diff_patch(worktree)
-            current_diff_stat = self.git_service.diff_stat(worktree)
+            current_diff_stat = self.git_service.diff_stat(worktree).strip()
         except Exception as exc:
             return f"git pre-commit observe failed: {exc}"
         approval = self._approved_diff_approval(task.id)
@@ -3229,6 +3371,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def list_model_decisions(task_id: str):
         try:
             return {"items": orchestrator.list_model_decisions(task_id)}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/tasks/{task_id}/model-calls")
+    def list_model_calls(task_id: str):
+        try:
+            return {"items": orchestrator.list_model_calls(task_id)}
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

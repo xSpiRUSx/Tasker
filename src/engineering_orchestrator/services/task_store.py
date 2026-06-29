@@ -14,6 +14,7 @@ from engineering_orchestrator.models import (
     ApprovalStatus,
     CorrectionRequest,
     EvaluationResult,
+    ModelCallRecord,
     ModelDecisionRecord,
     PromptBuildRecord,
     Task,
@@ -161,6 +162,11 @@ class TaskStore:
                   prompt_chars INTEGER,
                   prompt_tokens INTEGER,
                   completion_tokens INTEGER,
+                  cached_prompt_tokens INTEGER,
+                  reasoning_tokens INTEGER,
+                  total_tokens INTEGER,
+                  usage_source TEXT,
+                  usage_is_estimated INTEGER DEFAULT 0,
                   cost_usd REAL,
                   latency_ms INTEGER,
                   status TEXT,
@@ -315,6 +321,11 @@ class TaskStore:
             self._ensure_column(conn, "tasks", "parent_task_id", "TEXT")
             self._ensure_column(conn, "tasks", "related_task_ids_json", "TEXT")
             self._ensure_column(conn, "tasks", "correction_source", "TEXT")
+            self._ensure_column(conn, "model_calls", "cached_prompt_tokens", "INTEGER")
+            self._ensure_column(conn, "model_calls", "reasoning_tokens", "INTEGER")
+            self._ensure_column(conn, "model_calls", "total_tokens", "INTEGER")
+            self._ensure_column(conn, "model_calls", "usage_source", "TEXT")
+            self._ensure_column(conn, "model_calls", "usage_is_estimated", "INTEGER DEFAULT 0")
 
     def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
         columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -1175,6 +1186,97 @@ class TaskStore:
             ).fetchall()
         return [self._row_to_model_decision(row) for row in rows]
 
+    def add_model_call(
+        self,
+        task_id: str | None,
+        run_id: str | None,
+        operation: str,
+        runtime: str,
+        model: str,
+        provider: str | None = None,
+        reasoning_effort: str | None = None,
+        prompt_chars: int = 0,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
+        cached_prompt_tokens: int | None = None,
+        reasoning_tokens: int | None = None,
+        total_tokens: int | None = None,
+        usage_source: str | None = None,
+        usage_is_estimated: bool = False,
+        cost_usd: float | None = None,
+        latency_ms: int | None = None,
+        status: str | None = None,
+        error: str | None = None,
+    ) -> ModelCallRecord:
+        if total_tokens is None and (prompt_tokens is not None or completion_tokens is not None):
+            total_tokens = (prompt_tokens or 0) + (completion_tokens or 0)
+        record = ModelCallRecord(
+            id=new_id("model-call"),
+            task_id=task_id,
+            run_id=run_id,
+            operation=operation,
+            runtime=runtime,
+            provider=provider,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            prompt_chars=prompt_chars,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cached_prompt_tokens=cached_prompt_tokens,
+            reasoning_tokens=reasoning_tokens,
+            total_tokens=total_tokens,
+            usage_source=usage_source,
+            usage_is_estimated=usage_is_estimated,
+            cost_usd=cost_usd,
+            latency_ms=latency_ms,
+            status=status,
+            error=error,
+            created_at=utc_now(),
+        )
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO model_calls (
+                  id, task_id, run_id, operation, runtime, provider, model,
+                  reasoning_effort, prompt_chars, prompt_tokens, completion_tokens,
+                  cached_prompt_tokens, reasoning_tokens, total_tokens, usage_source,
+                  usage_is_estimated, cost_usd, latency_ms, status, error, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.id,
+                    record.task_id,
+                    record.run_id,
+                    record.operation,
+                    record.runtime,
+                    record.provider,
+                    record.model,
+                    record.reasoning_effort,
+                    record.prompt_chars,
+                    record.prompt_tokens,
+                    record.completion_tokens,
+                    record.cached_prompt_tokens,
+                    record.reasoning_tokens,
+                    record.total_tokens,
+                    record.usage_source,
+                    1 if record.usage_is_estimated else 0,
+                    record.cost_usd,
+                    record.latency_ms,
+                    record.status,
+                    record.error,
+                    record.created_at.isoformat(),
+                ),
+            )
+        return record
+
+    def list_model_calls(self, task_id: str) -> list[ModelCallRecord]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM model_calls WHERE task_id = ? ORDER BY created_at, id",
+                (task_id,),
+            ).fetchall()
+        return [self._row_to_model_call(row) for row in rows]
+
     def add_prompt_build(
         self,
         task_id: str | None,
@@ -1579,6 +1681,36 @@ class TaskStore:
             reason=row["reason"] or "",
             estimated_prompt_chars=row["estimated_prompt_chars"] or 0,
             max_prompt_chars=row["max_prompt_chars"] or 0,
+            created_at=_dt(row["created_at"]),
+        )
+
+    def _row_to_model_call(self, row: sqlite3.Row) -> ModelCallRecord:
+        prompt_tokens = row["prompt_tokens"]
+        completion_tokens = row["completion_tokens"]
+        total_tokens = row["total_tokens"] if "total_tokens" in row.keys() else None
+        if total_tokens is None and (prompt_tokens is not None or completion_tokens is not None):
+            total_tokens = (prompt_tokens or 0) + (completion_tokens or 0)
+        return ModelCallRecord(
+            id=row["id"],
+            task_id=row["task_id"],
+            run_id=row["run_id"],
+            operation=row["operation"],
+            runtime=row["runtime"],
+            provider=row["provider"],
+            model=row["model"],
+            reasoning_effort=row["reasoning_effort"],
+            prompt_chars=row["prompt_chars"] or 0,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cached_prompt_tokens=row["cached_prompt_tokens"] if "cached_prompt_tokens" in row.keys() else None,
+            reasoning_tokens=row["reasoning_tokens"] if "reasoning_tokens" in row.keys() else None,
+            total_tokens=total_tokens,
+            usage_source=row["usage_source"] if "usage_source" in row.keys() else None,
+            usage_is_estimated=bool(row["usage_is_estimated"]) if "usage_is_estimated" in row.keys() else False,
+            cost_usd=row["cost_usd"],
+            latency_ms=row["latency_ms"],
+            status=row["status"],
+            error=row["error"],
             created_at=_dt(row["created_at"]),
         )
 

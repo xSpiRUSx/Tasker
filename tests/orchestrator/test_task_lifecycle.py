@@ -3,6 +3,7 @@ from pathlib import Path
 import subprocess
 
 from engineering_orchestrator.api import Orchestrator
+from engineering_orchestrator.executors.mock_executor import MockExecutor
 from engineering_orchestrator.models import ApprovalDecisionRequest, ContinueTaskRequest, CreateCorrectionRequest, CreateTaskRequest
 from engineering_orchestrator.settings import Settings
 
@@ -38,6 +39,47 @@ def run_git(path: Path, *args: str) -> str:
     result = subprocess.run(["git", "-C", str(path), *args], check=False, text=True, capture_output=True)
     assert result.returncode == 0, result.stderr or result.stdout
     return result.stdout
+
+
+class RecordingGitService:
+    def __init__(self, worktree_path: Path):
+        self.worktree_path = worktree_path
+        self.created_worktrees: list[dict[str, str]] = []
+
+    def is_repository(self, path: Path) -> bool:
+        return True
+
+    def create_worktree(
+        self,
+        repo_path: Path,
+        worktrees_root: Path,
+        task_id: str,
+        branch_name: str,
+        base_branch: str = "main",
+    ) -> Path:
+        self.worktree_path.mkdir(parents=True, exist_ok=True)
+        self.created_worktrees.append(
+            {
+                "repo_path": str(repo_path),
+                "worktrees_root": str(worktrees_root),
+                "task_id": task_id,
+                "branch_name": branch_name,
+                "base_branch": base_branch,
+            }
+        )
+        return self.worktree_path
+
+    def get_status_entries(self, worktree_path: Path) -> list:
+        return []
+
+    def status(self, worktree_path: Path) -> str:
+        return ""
+
+    def diff_stat(self, worktree_path: Path) -> str:
+        return ""
+
+    def diff_patch(self, worktree_path: Path) -> str:
+        return ""
 
 
 def test_full_mvp_lifecycle(tmp_path):
@@ -105,6 +147,42 @@ def test_diff_approval_can_be_disabled(tmp_path):
     assert orchestrator.task_store.get_artifact(task.id, "diff_summary") is not None
     events = [event.event_type for event in orchestrator.task_store.list_events(task.id)]
     assert "diff_approval_skipped" in events
+
+
+def test_codex_executor_does_not_create_worktree_by_default(tmp_path):
+    settings = replace(make_settings(tmp_path), default_executor="codex")
+    orchestrator = Orchestrator(settings)
+    orchestrator.executor = MockExecutor()
+    orchestrator.projects.projects[0]["test_commands"] = []
+
+    response = orchestrator.create_task(CreateTaskRequest(message="Fix billing-api login bug"))
+    task = orchestrator.decide_approval(response.task_id, "plan", ApprovalDecisionRequest(decision="approve"))
+
+    assert task.status == "awaiting_diff_approval"
+    assert task.worktree_path is None
+    events = [event.event_type for event in orchestrator.task_store.list_events(task.id)]
+    assert "worktree_skipped" in events
+    assert "worktree_created" not in events
+
+
+def test_workflow_can_enable_worktree_for_codex_executor(tmp_path):
+    settings = replace(make_settings(tmp_path), default_executor="codex")
+    orchestrator = Orchestrator(settings)
+    orchestrator.executor = MockExecutor()
+    orchestrator.projects.projects[0]["test_commands"] = []
+    orchestrator.workflows.get("simple_dev_no_config")["use_worktree"] = True
+    git_service = RecordingGitService(tmp_path / "task-worktree")
+    orchestrator.git_service = git_service
+    orchestrator.observer.git_service = git_service
+
+    response = orchestrator.create_task(CreateTaskRequest(message="Fix billing-api login bug"))
+    task = orchestrator.decide_approval(response.task_id, "plan", ApprovalDecisionRequest(decision="approve"))
+
+    assert task.status == "awaiting_diff_approval"
+    assert task.worktree_path == str(tmp_path / "task-worktree")
+    assert len(git_service.created_worktrees) == 1
+    events = [event.event_type for event in orchestrator.task_store.list_events(task.id)]
+    assert "worktree_created" in events
 
 
 def test_config_change_requires_config_gate_after_plan(tmp_path):
@@ -405,3 +483,43 @@ def test_commit_requires_fresh_diff_approval(tmp_path):
     assert "diff content differs" in orchestrator.artifact_store.read_text(
         orchestrator.task_store.get_artifact(task.id, "commit_result")
     )
+    pending_diff = orchestrator.task_store.get_pending_approval(task.id, "diff")
+    assert pending_diff is not None
+    assert pending_diff.requested_payload["reapproval_reason"] == "diff content differs from approved diff"
+
+    orchestrator.task_store.resolve_approval(pending_diff.id, "cancelled")
+    repair = orchestrator.repair_state(task.id)
+
+    assert "awaiting status has no pending approval" in repair["findings"]
+    repaired_pending_diff = orchestrator.task_store.get_pending_approval(task.id, "diff")
+    assert repaired_pending_diff is not None
+    assert repaired_pending_diff.requested_payload["reapproval_reason"] == "awaiting_diff_reapproval had no pending diff approval"
+
+
+def test_commit_allows_unchanged_approved_git_diff(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run_git(repo, "init")
+    run_git(repo, "config", "user.email", "tasker@example.local")
+    run_git(repo, "config", "user.name", "Tasker Tests")
+    (repo / "tracked.txt").write_text("before\n", encoding="utf-8", newline="\n")
+    run_git(repo, "add", "tracked.txt")
+    run_git(repo, "commit", "-m", "initial")
+
+    orchestrator = Orchestrator(make_settings(tmp_path))
+    orchestrator.projects.projects[0]["test_commands"] = []
+    response = orchestrator.create_task(CreateTaskRequest(message="Fix billing-api login bug"))
+    task = orchestrator.task_store.get_task(response.task_id)
+    task.worktree_path = str(repo)
+    orchestrator.task_store.update_task(task)
+    (repo / "tracked.txt").write_text("approved change\n", encoding="utf-8", newline="\n")
+
+    task = orchestrator.decide_approval(response.task_id, "plan", ApprovalDecisionRequest(decision="approve"))
+    assert task.status == "awaiting_diff_approval"
+    task = orchestrator.decide_approval(response.task_id, "diff", ApprovalDecisionRequest(decision="approve"))
+    assert task.status == "awaiting_commit_approval"
+
+    task = orchestrator.decide_approval(response.task_id, "commit", ApprovalDecisionRequest(decision="approve"))
+
+    assert task.status == "closed"
+    assert run_git(repo, "show", "--format=%B", "--no-patch", "HEAD").startswith("fix(billing_api): fix billing api login bug")

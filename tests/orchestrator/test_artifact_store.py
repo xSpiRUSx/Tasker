@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from engineering_orchestrator.services.artifact_store import ArtifactStore
 from engineering_orchestrator.services.event_service import EventService
 from engineering_orchestrator.services.task_store import TaskStore
@@ -46,6 +48,50 @@ def test_non_versioned_event_artifact_is_stable(tmp_path):
     assert len(artifacts) == 1
     assert "first" in artifact_store.read_text(artifacts[0])
     assert "second" in artifact_store.read_text(artifacts[0])
+
+
+def test_artifact_write_retries_transient_windows_lock(tmp_path, monkeypatch):
+    task_store = TaskStore(tmp_path / "orchestrator.sqlite3")
+    artifact_store = ArtifactStore(tmp_path / "obsidian", write_retry_delay_seconds=0)
+    event_service = EventService(task_store, artifact_store)
+    task = task_store.create_task("Fix login")
+    task.artifacts_dir = artifact_store.create_task_folder(task, "Fix login")
+    task_store.update_task(task)
+    calls = {"count": 0}
+    original_replace = Path.replace
+
+    def flaky_replace(self, target):
+        if self.name.startswith(".events.md.") and calls["count"] == 0:
+            calls["count"] += 1
+            raise PermissionError(5, "Access is denied", str(target))
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", flaky_replace)
+
+    event_service.add(task, "first")
+
+    artifacts = [artifact for artifact in task_store.list_artifacts(task.id) if artifact.kind == "events"]
+    assert len(artifacts) == 1
+    assert calls["count"] == 1
+    assert "first" in artifact_store.read_text(artifacts[0])
+
+
+def test_event_artifact_truncates_large_payloads(tmp_path):
+    task_store = TaskStore(tmp_path / "orchestrator.sqlite3")
+    artifact_store = ArtifactStore(tmp_path / "obsidian")
+    event_service = EventService(task_store, artifact_store)
+    task = task_store.create_task("Fix login")
+    task.artifacts_dir = artifact_store.create_task_folder(task, "Fix login")
+    task_store.update_task(task)
+
+    event_service.add(task, "execution_completed", {"stdout": "x" * 10000})
+
+    artifact = task_store.get_artifact(task.id, "events")
+    assert artifact is not None
+    content = artifact_store.read_text(artifact)
+    assert "[truncated" in content
+    assert "x" * 5000 not in content
+    assert len(content) < 3000
 
 
 def test_task_folder_uses_short_slug_for_long_russian_text(tmp_path):

@@ -329,6 +329,30 @@ class ModelDecisionRecord(BaseModel):
     created_at: datetime
 
 
+class ModelCallRecord(BaseModel):
+    id: str
+    task_id: str | None = None
+    run_id: str | None = None
+    operation: str
+    runtime: str
+    provider: str | None = None
+    model: str
+    reasoning_effort: str | None = None
+    prompt_chars: int = 0
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    cached_prompt_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    total_tokens: int | None = None
+    usage_source: str | None = None
+    usage_is_estimated: bool = False
+    cost_usd: float | None = None
+    latency_ms: int | None = None
+    status: str | None = None
+    error: str | None = None
+    created_at: datetime
+
+
 class PromptBuildRecord(BaseModel):
     id: str
     task_id: str | None = None

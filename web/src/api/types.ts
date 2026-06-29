@@ -103,6 +103,30 @@ export interface ModelDecision {
   created_at: string;
 }
 
+export interface ModelCall {
+  id: string;
+  task_id?: string | null;
+  run_id?: string | null;
+  operation: string;
+  runtime: string;
+  provider?: string | null;
+  model: string;
+  reasoning_effort?: string | null;
+  prompt_chars: number;
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+  cached_prompt_tokens?: number | null;
+  reasoning_tokens?: number | null;
+  total_tokens?: number | null;
+  usage_source?: string | null;
+  usage_is_estimated?: boolean;
+  cost_usd?: number | null;
+  latency_ms?: number | null;
+  status?: string | null;
+  error?: string | null;
+  created_at: string;
+}
+
 export interface PromptBuild {
   id: string;
   task_id?: string | null;

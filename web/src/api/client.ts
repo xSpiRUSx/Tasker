@@ -12,6 +12,7 @@ import type {
   JobAcceptedResponse,
   ListTasksParams,
   ListTasksResponse,
+  ModelCall,
   ModelDecision,
   PromptBuild,
   RouterConfigDocument,
@@ -167,6 +168,11 @@ export function cancelJob(jobId: string): Promise<TaskJob> {
 
 export async function listModelDecisions(taskId: string): Promise<{ items: ModelDecision[] }> {
   const payload = await request<{ items: ModelDecision[] } | ModelDecision[]>(`/tasks/${encodeURIComponent(taskId)}/model-decisions`);
+  return Array.isArray(payload) ? { items: payload } : payload;
+}
+
+export async function listModelCalls(taskId: string): Promise<{ items: ModelCall[] }> {
+  const payload = await request<{ items: ModelCall[] } | ModelCall[]>(`/tasks/${encodeURIComponent(taskId)}/model-calls`);
   return Array.isArray(payload) ? { items: payload } : payload;
 }
 

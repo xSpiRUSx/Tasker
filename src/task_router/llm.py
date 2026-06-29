@@ -30,6 +30,7 @@ def build_router_prompt(config: RouterConfig) -> str:
         f"requires_tests={workflow.requires_tests}; requires_review={workflow.requires_review}; "
         f"requires_config_approval={workflow.requires_config_approval}; "
         f"requires_deploy_prep={workflow.requires_deploy_prep}; "
+        f"use_worktree={workflow.use_worktree}; "
         f"approval_gates={workflow.approval_gates}; risk_flags={workflow.risk_flags}; "
         f"allowed_change_types={workflow.allowed_change_types}; "
         f"blocked_change_types={workflow.blocked_change_types}; "

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -62,7 +62,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/tasks/{task_id}")
     def get_task(task_id: str):
         try:
-            return orchestrator.get_task(task_id)
+            return orchestrator.get_task_payload(task_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -132,6 +132,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @app.get("/tasks/{task_id}/jobs")
+    def list_jobs(task_id: str):
+        try:
+            return {"items": orchestrator.list_jobs(task_id)}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/jobs/{job_id}")
+    def get_job(job_id: str):
+        try:
+            return orchestrator.get_job(job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.get("/runs/{run_id}")
     def get_run(run_id: str):
         try:
@@ -146,17 +160,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    @app.post("/tasks/{task_id}/approvals/{gate}")
+    @app.post("/tasks/{task_id}/approvals/{gate}", status_code=status.HTTP_202_ACCEPTED)
     def decide_approval(task_id: str, gate: str, request: ApprovalDecisionRequest):
         try:
-            return orchestrator.decide_approval(task_id, gate, request)
+            return orchestrator.enqueue_approval_decision(task_id, gate, request)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    @app.post("/tasks/{task_id}/messages")
+    @app.post("/tasks/{task_id}/messages", status_code=status.HTTP_202_ACCEPTED)
     def continue_task(task_id: str, request: ContinueTaskRequest):
         try:
-            return orchestrator.continue_task(task_id, request)
+            return orchestrator.enqueue_continue_task(task_id, request)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

@@ -7,12 +7,14 @@ import type {
   CreateTaskRequest,
   CreateTaskResponse,
   HealthResponse,
+  JobAcceptedResponse,
   ListTasksParams,
   ListTasksResponse,
   RouteDecision,
   Task,
   TaskArtifact,
   TaskEvent,
+  TaskJob,
 } from "./types";
 
 const API_BASE = (import.meta.env.VITE_TASKER_API_BASE || "http://127.0.0.1:8000").replace(/\/$/, "");
@@ -121,18 +123,23 @@ export async function listEvents(taskId: string): Promise<{ items: TaskEvent[] }
   return Array.isArray(payload) ? { items: payload } : payload;
 }
 
-export function decideApproval(taskId: string, gate: string, input: ApprovalDecisionInput): Promise<Task> {
-  return request<Task>(`/tasks/${encodeURIComponent(taskId)}/approvals/${encodeURIComponent(gate)}`, {
+export function decideApproval(taskId: string, gate: string, input: ApprovalDecisionInput): Promise<JobAcceptedResponse> {
+  return request<JobAcceptedResponse>(`/tasks/${encodeURIComponent(taskId)}/approvals/${encodeURIComponent(gate)}`, {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
-export function sendTaskMessage(taskId: string, message: string): Promise<Task> {
-  return request<Task>(`/tasks/${encodeURIComponent(taskId)}/messages`, {
+export function sendTaskMessage(taskId: string, message: string): Promise<JobAcceptedResponse> {
+  return request<JobAcceptedResponse>(`/tasks/${encodeURIComponent(taskId)}/messages`, {
     method: "POST",
     body: JSON.stringify({ message }),
   });
+}
+
+export async function listJobs(taskId: string): Promise<{ items: TaskJob[] }> {
+  const payload = await request<{ items: TaskJob[] } | TaskJob[]>(`/tasks/${encodeURIComponent(taskId)}/jobs`);
+  return Array.isArray(payload) ? { items: payload } : payload;
 }
 
 export function cancelTask(taskId: string, comment?: string): Promise<Task> {

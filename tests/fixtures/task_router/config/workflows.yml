@@ -18,6 +18,41 @@ workflows:
       - При необходимости посмотреть контекст выбранного проекта.
       - Дать короткий ответ и явно указать, если данных недостаточно.
 
+  - id: 1c_business_logic_change
+    name: 1C business logic change
+    description: Multi-phase 1C change touching documents, posting, registers, exchange, queues, acceptance, or pricing.
+    project_ids: ["solvix_zn", "sq_erp_ext"]
+    intents: ["code_change", "investigation"]
+    task_kinds:
+      - configuration_change
+      - feature
+      - bugfix
+      - external_report_or_processing
+      - investigation
+    complexity: ["medium", "complex", "epic"]
+    required_tools: ["codex"]
+    requires_spec: true
+    requires_tests: true
+    requires_review: true
+    requires_config_approval: true
+    requires_deploy_prep: false
+    approval_gates: ["plan", "spec", "security_change", "diff", "commit"]
+    risk_flags:
+      - 1c_business_logic
+      - document
+      - posting
+      - register
+      - exchange
+      - queue
+      - pricing
+      - acceptance
+    steps:
+      - Inspect affected 1C metadata and modules.
+      - Design a phased implementation plan.
+      - Implement the approved minimal core change.
+      - Validate or mark manual review required.
+      - Review diff and prepare correction if needed.
+
   - id: simple_external_development
     name: Простая разработка без доработки конфигурации
     description: Простая разработка внешнего отчета или обработки, либо написание кода или запроса прямо в ответе без изменения конфигурации.

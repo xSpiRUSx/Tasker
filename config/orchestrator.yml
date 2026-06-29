@@ -13,17 +13,17 @@ artifacts:
   use_relative_paths_in_db: true
 
 router:
-  provider: "mock"
+  provider: "codex-cli"
   projects_path: "./config/projects.yml"
   workflows_path: "./config/workflows.yml"
 
 planning:
-  provider: "mock"
+  provider: "codex-cli"
   model: null
   timeout_seconds: 900
 
 execution:
-  default_executor: "mock"
+  default_executor: "codex"
   codex_bin: "codex"
   codex_model: null
   codex_timeout_seconds: 1800

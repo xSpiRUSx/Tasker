@@ -31,23 +31,16 @@ class GitService:
             raise FileExistsError(f"Worktree already exists: {worktree_path}")
 
         start_point = base_branch if self._ref_exists(project_path, base_branch) else "HEAD"
-        result = subprocess.run(
-            ["git", "-C", str(project_path), "worktree", "add", "-b", branch_name, str(worktree_path), start_point],
-            check=False,
-            text=True,
-            capture_output=True,
+        result = self._run_git(
+            project_path,
+            ["worktree", "add", "-b", branch_name, str(worktree_path), start_point],
         )
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or result.stdout.strip())
         return worktree_path
 
     def is_repository(self, path: Path) -> bool:
-        result = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
-            check=False,
-            text=True,
-            capture_output=True,
-        )
+        result = self._run_git(path, ["rev-parse", "--show-toplevel"])
         return result.returncode == 0
 
     def status(self, worktree_path: Path) -> str:
@@ -87,39 +80,39 @@ class GitService:
 
     def commit(self, worktree_path: Path, message: str) -> str:
         self.diff_check(worktree_path)
-        subprocess.run(["git", "-C", str(worktree_path), "add", "-A"], check=False, text=True, capture_output=True)
-        result = subprocess.run(["git", "-C", str(worktree_path), "commit", "-m", message], check=False, text=True, capture_output=True)
+        self._run_git(worktree_path, ["add", "-A"])
+        result = self._run_git(worktree_path, ["commit", "-m", message])
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or result.stdout.strip())
         return self._git(worktree_path, ["rev-parse", "HEAD"]).strip()
 
     def diff_check(self, worktree_path: Path) -> str:
-        check = subprocess.run(["git", "-C", str(worktree_path), "diff", "--check"], check=False, text=True, capture_output=True)
+        check = self._run_git(worktree_path, ["diff", "--check"])
         if check.returncode != 0:
             raise RuntimeError(check.stderr.strip() or check.stdout.strip())
         return check.stdout
 
     def _git(self, worktree_path: Path, args: list[str]) -> str:
-        result = subprocess.run(["git", "-C", str(worktree_path), *args], check=False, text=True, capture_output=True)
+        result = self._run_git(worktree_path, args)
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or result.stdout.strip())
         return result.stdout
 
     def _mark_untracked_for_diff(self, worktree_path: Path) -> None:
-        result = subprocess.run(
-            ["git", "-C", str(worktree_path), "add", "--intent-to-add", "--", "."],
-            check=False,
-            text=True,
-            capture_output=True,
-        )
+        result = self._run_git(worktree_path, ["add", "--intent-to-add", "--", "."])
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or result.stdout.strip())
 
     def _ref_exists(self, repository_path: Path, ref: str) -> bool:
-        result = subprocess.run(
-            ["git", "-C", str(repository_path), "rev-parse", "--verify", "--quiet", ref],
+        result = self._run_git(repository_path, ["rev-parse", "--verify", "--quiet", ref])
+        return result.returncode == 0
+
+    def _run_git(self, repository_path: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-c", "core.quotepath=false", "-C", str(repository_path), *args],
             check=False,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
         )
-        return result.returncode == 0

@@ -9,6 +9,28 @@ from engineering_orchestrator.executors.base import ExecutionResult
 from engineering_orchestrator.models import Task, TaskArtifact
 
 
+PROMPT_ARTIFACT_KINDS = {
+    "request",
+    "route_decision",
+    "context_summary",
+    "working_memory",
+    "spec",
+    "todo",
+    "test_plan",
+    "approval_request",
+    "executor_policy",
+    "repair_prompt",
+    "correction_request",
+    "correction_context",
+}
+MAX_PROMPT_ARTIFACT_CHARS = 40_000
+MAX_PROMPT_ARTIFACT_TOTAL_CHARS = 300_000
+
+
+class PromptTooLargeError(ValueError):
+    pass
+
+
 class CodexExecutor:
     def __init__(
         self,
@@ -42,7 +64,15 @@ class CodexExecutor:
         if self.model:
             command.extend(["--model", self.model])
 
-        prompt = self._build_prompt(task, artifacts)
+        try:
+            prompt = self._build_prompt(task, artifacts)
+        except PromptTooLargeError as exc:
+            return ExecutionResult(
+                status="failed",
+                changed_files=[],
+                summary=f"Codex prompt_too_large: {exc}",
+                logs=str(exc),
+            )
         try:
             completed = subprocess.run(
                 self._windows_command(command),
@@ -94,16 +124,26 @@ class CodexExecutor:
 
     def _build_prompt(self, task: Task, artifacts: list[TaskArtifact]) -> str:
         artifact_sections = []
-        for artifact in artifacts:
-            if artifact.kind in {"task_index", "events"}:
-                continue
+        total_artifact_chars = 0
+        for artifact in self._prompt_artifacts(artifacts):
             path = self.artifacts_root / artifact.relative_path
             if not path.exists():
                 continue
+            content = path.read_text(encoding="utf-8")
+            if len(content) > MAX_PROMPT_ARTIFACT_CHARS:
+                content = (
+                    content[:MAX_PROMPT_ARTIFACT_CHARS]
+                    + "\n\n[Artifact truncated before sending to Codex executor. Open the file path above if more context is needed.]"
+                )
+            if total_artifact_chars + len(content) > MAX_PROMPT_ARTIFACT_TOTAL_CHARS:
+                raise PromptTooLargeError(
+                    f"Artifact context exceeds {MAX_PROMPT_ARTIFACT_TOTAL_CHARS} characters before `{artifact.kind}`."
+                )
+            total_artifact_chars += len(content)
             artifact_sections.append(
                 f"## Artifact: {artifact.title} ({artifact.kind})\n\n"
                 f"Path: {path}\n\n"
-                f"```markdown\n{path.read_text(encoding='utf-8')}\n```"
+                f"```markdown\n{content}\n```"
             )
 
         return f"""
@@ -132,6 +172,19 @@ Artifacts:
 
 {chr(10).join(artifact_sections) if artifact_sections else "No readable artifacts were provided."}
 """.strip()
+
+    def _prompt_artifacts(self, artifacts: list[TaskArtifact]) -> list[TaskArtifact]:
+        latest_by_kind: dict[str, TaskArtifact] = {}
+        for artifact in artifacts:
+            if artifact.kind not in PROMPT_ARTIFACT_KINDS:
+                continue
+            current = latest_by_kind.get(artifact.kind)
+            if current is None or self._artifact_sort_key(artifact) > self._artifact_sort_key(current):
+                latest_by_kind[artifact.kind] = artifact
+        return sorted(latest_by_kind.values(), key=lambda item: (item.kind, item.version or 0, item.created_at))
+
+    def _artifact_sort_key(self, artifact: TaskArtifact) -> tuple[int, str]:
+        return (artifact.version or 0, artifact.created_at.isoformat())
 
     def _resolve_codex_bin(self) -> str:
         return shutil.which(self.codex_bin) or self.codex_bin

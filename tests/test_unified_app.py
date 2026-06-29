@@ -1,4 +1,5 @@
 from pathlib import Path
+import time
 
 from fastapi.testclient import TestClient
 
@@ -7,6 +8,18 @@ from engineering_orchestrator.settings import Settings
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def wait_for_job(client: TestClient, job_id: str) -> dict:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        response = client.get(f"/jobs/{job_id}")
+        assert response.status_code == 200
+        payload = response.json()
+        if payload["status"] in {"succeeded", "failed", "cancelled"}:
+            return payload
+        time.sleep(0.05)
+    raise AssertionError(f"Job did not finish: {job_id}")
 
 
 def make_settings(tmp_path: Path) -> Settings:
@@ -45,6 +58,26 @@ def test_unified_route_endpoint_uses_internal_router(tmp_path):
     assert payload["project_id"] == "solvix_zn"
     assert payload["workflow_id"] == "simple_external_development"
     assert payload["approval_gates"] == ["plan", "diff", "commit"]
+
+
+def test_unified_route_prefers_specific_project_over_generic_dot_path(tmp_path):
+    client = TestClient(create_app(make_settings(tmp_path)))
+    message = (
+        "\u0420\u0435\u0430\u043b\u0438\u0437\u0443\u0439 \u0437\u0430\u0434\u0430\u0447\u0443 \u0432 "
+        "\u043f\u0440\u043e\u0435\u043a\u0442\u0435 "
+        "\u0441\u043d\u0435\u0436\u043d\u0430\u044f \u043a\u043e\u0440\u043e\u043b\u0435\u0432\u0430: "
+        "\u0434\u043e\u0431\u0430\u0432\u044c "
+        "\u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0443 "
+        "\u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u0430."
+    )
+
+    response = client.post("/route", json={"message": message})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["project_id"] == "sq_erp_ext"
+    assert payload["project_path"] == r"C:\Configuration\SQ_ERP\ERP_Ext"
+    assert payload["recommended_tool_ids"] == ["1c-graph-metadata-mcp", "codex"]
 
 
 def test_unified_tasks_endpoint_uses_router_decision(tmp_path):
@@ -102,7 +135,15 @@ def test_unified_tasks_endpoint_uses_router_decision(tmp_path):
     assert context_response.json()["task_id"] == payload["task_id"]
 
     approve_response = client.post(f"/tasks/{payload['task_id']}/approvals/plan", json={"decision": "approve"})
-    assert approve_response.status_code == 200
+    assert approve_response.status_code == 202
+    approval_job = approve_response.json()
+    assert approval_job["accepted"] is True
+    assert approval_job["task_id"] == payload["task_id"]
+    assert wait_for_job(client, approval_job["job_id"])["status"] == "succeeded"
+
+    task_response = client.get(f"/tasks/{payload['task_id']}")
+    assert task_response.status_code == 200
+    assert task_response.json()["latest_job"]["status"] == "succeeded"
 
     runs_response = client.get(f"/tasks/{payload['task_id']}/runs")
     assert runs_response.status_code == 200

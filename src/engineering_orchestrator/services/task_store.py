@@ -16,6 +16,7 @@ from engineering_orchestrator.models import (
     Task,
     TaskArtifact,
     TaskEvent,
+    TaskJob,
     TaskStatus,
 )
 
@@ -109,6 +110,18 @@ class TaskStore:
                   event_type TEXT NOT NULL,
                   payload_json TEXT NOT NULL,
                   created_at TEXT NOT NULL,
+                  FOREIGN KEY(task_id) REFERENCES tasks(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS jobs (
+                  id TEXT PRIMARY KEY,
+                  task_id TEXT NOT NULL,
+                  action TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  error TEXT,
+                  created_at TEXT NOT NULL,
+                  started_at TEXT,
+                  finished_at TEXT,
                   FOREIGN KEY(task_id) REFERENCES tasks(id)
                 );
 
@@ -250,6 +263,8 @@ class TaskStore:
         return [self._row_to_task(row) for row in rows], int(total_row["count"])
 
     def update_task(self, task: Task) -> None:
+        if task.status not in {"closed", "cancelled"}:
+            task.closed_at = None
         task.updated_at = utc_now()
         with self.connect() as conn:
             conn.execute(
@@ -483,6 +498,66 @@ class TaskStore:
                 (event.id, event.task_id, event.event_type, _json(event.payload), event.created_at.isoformat()),
             )
         return event
+
+    def create_job(self, task_id: str, action: str) -> TaskJob:
+        job = TaskJob(
+            id=new_id("job"),
+            task_id=task_id,
+            action=action,
+            status="queued",
+            created_at=utc_now(),
+        )
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO jobs (id, task_id, action, status, error, created_at, started_at, finished_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job.id,
+                    job.task_id,
+                    job.action,
+                    job.status,
+                    job.error,
+                    job.created_at.isoformat(),
+                    None,
+                    None,
+                ),
+            )
+        return job
+
+    def start_job(self, job_id: str) -> TaskJob:
+        started_at = utc_now()
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE jobs SET status = 'running', started_at = ? WHERE id = ?",
+                (started_at.isoformat(), job_id),
+            )
+        return self.get_job(job_id)
+
+    def finish_job(self, job_id: str, status: str, error: str | None = None) -> TaskJob:
+        finished_at = utc_now()
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE jobs SET status = ?, error = ?, finished_at = ? WHERE id = ?",
+                (status, error, finished_at.isoformat(), job_id),
+            )
+        return self.get_job(job_id)
+
+    def get_job(self, job_id: str) -> TaskJob:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"Job not found: {job_id}")
+        return self._row_to_job(row)
+
+    def list_jobs(self, task_id: str) -> list[TaskJob]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM jobs WHERE task_id = ? ORDER BY created_at, id",
+                (task_id,),
+            ).fetchall()
+        return [self._row_to_job(row) for row in rows]
 
     def list_events(self, task_id: str) -> list[TaskEvent]:
         with self.connect() as conn:
@@ -793,6 +868,18 @@ class TaskStore:
             event_type=row["event_type"],
             payload=json.loads(row["payload_json"]),
             created_at=_dt(row["created_at"]),
+        )
+
+    def _row_to_job(self, row: sqlite3.Row) -> TaskJob:
+        return TaskJob(
+            id=row["id"],
+            task_id=row["task_id"],
+            action=row["action"],
+            status=row["status"],
+            error=row["error"],
+            created_at=_dt(row["created_at"]),
+            started_at=_dt(row["started_at"]),
+            finished_at=_dt(row["finished_at"]),
         )
 
     def _row_to_run(self, row: sqlite3.Row) -> AgentRun:

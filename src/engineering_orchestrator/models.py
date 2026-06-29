@@ -33,6 +33,7 @@ TaskStatus = Literal[
     "awaiting_deploy_approval",
     "closed",
     "failed",
+    "prompt_too_large",
     "cancelled",
 ]
 
@@ -61,6 +62,8 @@ ArtifactKind = Literal[
     "run_report_json",
     "evaluation_report",
     "repair_prompt",
+    "correction_request",
+    "correction_context",
     "diagnosis",
     "diff_summary",
     "diff_patch",
@@ -135,6 +138,17 @@ class TaskEvent(BaseModel):
     created_at: datetime
 
 
+class TaskJob(BaseModel):
+    id: str
+    task_id: str
+    action: str
+    status: Literal["queued", "running", "succeeded", "failed", "cancelled"]
+    error: str | None = None
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
 class AgentRun(BaseModel):
     id: str
     task_id: str
@@ -204,6 +218,14 @@ class CreateTaskResponse(BaseModel):
     workflow_id: str | None
     artifacts_dir: str | None
     current_approval_gate: str | None
+
+
+class JobAcceptedResponse(BaseModel):
+    accepted: bool = True
+    job_id: str
+    task_id: str
+    status: str
+    action: str
 
 
 class ApprovalDecisionRequest(BaseModel):

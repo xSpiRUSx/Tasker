@@ -27,6 +27,10 @@ class ProjectRegistry:
         project = self.get(project_id) if project_id else None
         return [str(command) for command in (project or {}).get("test_commands", [])]
 
+    def validation_profile(self, project_id: str | None) -> str:
+        project = self.get(project_id) if project_id else None
+        return str((project or {}).get("validation_profile", "generic"))
+
     def blocked_paths(self, project_id: str | None) -> list[str]:
         project = self.get(project_id) if project_id else None
         defaults = [".env", ".env.*", "secrets/**", "**/secrets/**"]

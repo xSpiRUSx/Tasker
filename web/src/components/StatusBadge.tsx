@@ -13,6 +13,6 @@ function classNameForStatus(status: string): string {
   if (status === "closed") return "status-badge--closed";
   if (status === "failed" || status === "validation_failed") return "status-badge--failed";
   if (status === "cancelled") return "status-badge--cancelled";
-  if (status === "changes_requested" || status === "plan_rejected") return "status-badge--changes";
+  if (status === "changes_requested" || status === "plan_rejected" || status === "prompt_too_large") return "status-badge--changes";
   return "status-badge--neutral";
 }

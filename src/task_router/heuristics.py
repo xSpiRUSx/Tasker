@@ -12,24 +12,48 @@ from task_router.models import (
 )
 
 COMPLEXITY_ORDER: list[Complexity] = ["trivial", "simple", "medium", "complex", "epic"]
+IGNORED_PROJECT_MATCH_CANDIDATES = {".", "./", ".\\"}
+BUSINESS_LOGIC_RISK_FLAGS = {
+    "1c_business_logic",
+    "document",
+    "posting",
+    "register",
+    "exchange",
+    "queue",
+    "pricing",
+    "acceptance",
+}
 
 
 def complexity_score(complexity: Complexity) -> int:
     return COMPLEXITY_ORDER.index(complexity) + 1
 
 
+def _project_match_candidates(project) -> list[str]:
+    raw_candidates = [project.id, project.name, project.path, *project.aliases]
+    candidates: list[str] = []
+    for item in raw_candidates:
+        candidate = item.strip().lower() if item and item.strip() else ""
+        if not candidate or candidate in IGNORED_PROJECT_MATCH_CANDIDATES:
+            continue
+        candidates.append(candidate)
+    return candidates
+
+
 def infer_project_id(text: str, config: RouterConfig) -> tuple[str | None, float]:
     lowered = text.lower()
     best_project_id: str | None = None
     best_score = 0
+    best_match_length = 0
 
     for project in config.projects.values():
-        raw_candidates = [project.id, project.name, project.path, *project.aliases]
-        candidates = [item.strip().lower() for item in raw_candidates if item and item.strip()]
-        score = sum(1 for item in candidates if item in lowered)
-        if score > best_score:
+        matches = [item for item in _project_match_candidates(project) if item in lowered]
+        score = len(matches)
+        match_length = max((len(item) for item in matches), default=0)
+        if (score, match_length) > (best_score, best_match_length):
             best_project_id = project.id
             best_score = score
+            best_match_length = match_length
 
     if best_project_id is None and len(config.projects) == 1:
         return next(iter(config.projects)), 0.5
@@ -41,6 +65,14 @@ def infer_project_id(text: str, config: RouterConfig) -> tuple[str | None, float
 
 def infer_complexity(text: str) -> Complexity:
     lowered = text.lower()
+    if any(word in lowered for word in ["архитект", "миграц", "перепис", "много проектов"]):
+        return "epic"
+    if any(word in lowered for word in ["сложно", "рефактор", "безопасн", "интеграц", "производитель"]):
+        return "complex"
+    if any(word in lowered for word in ["добав", "исправ", "сдел", "реализ", "измен"]):
+        return "medium"
+    if any(word in lowered for word in ["почему", "как", "где", "найди", "проверь"]):
+        return "simple"
     if any(word in lowered for word in ["архитект", "миграц", "перепис", "epic", "много проектов"]):
         return "epic"
     if any(word in lowered for word in ["сложно", "рефактор", "безопасн", "интеграц", "производитель"]):
@@ -60,6 +92,12 @@ def infer_intent(text: str) -> TaskIntent:
         return "investigation"
     if any(word in lowered for word in ["как", "что", "почему", "какой", "какая", "какие", "?"]):
         return "question"
+    if any(word in lowered for word in ["напиши", "создай", "сделай", "добав", "исправ", "реализ", "измени", "сгенерируй"]):
+        return "code_change"
+    if any(word in lowered for word in ["проверь", "найди", "посмотри", "проанализ", "исслед"]):
+        return "investigation"
+    if any(word in lowered for word in ["как", "что", "почему", "какой", "какая", "какие", "?"]):
+        return "question"
     return "unknown"
 
 
@@ -67,6 +105,28 @@ def infer_task_kind(text: str, intent: TaskIntent) -> TaskKind:
     lowered = text.lower()
     if intent == "question":
         return "question"
+    if any(word in lowered for word in ["внешн", "обработк", "отчет", "отчёт", "epf", "erf"]):
+        return "external_report_or_processing"
+    if any(word in lowered for word in ["миграц", "migration", "alembic", "schema", "схем"]):
+        return "migration"
+    if any(word in lowered for word in ["deploy", "деплой", "production", "prod", "релиз", "ci", "cd"]):
+        return "deployment_change"
+    if any(word in lowered for word in ["security", "безопасн", "permission", "role", "роль", "права", "auth", "логин", "парол", "токен"]):
+        return "security_change"
+    if any(word in lowered for word in ["dependency", "зависим", "package.json", "pyproject", "requirements", "пакет"]):
+        return "dependency_change"
+    if any(word in lowered for word in ["реквизит", "справочник", "документ", "регистр", "форма", "роль", "подсистем"]):
+        return "configuration_change"
+    if any(word in lowered for word in ["баг", "bug", "ошиб", "не работает", "исправ"]):
+        return "bugfix"
+    if any(word in lowered for word in ["фича", "feature", "добавь", "добавить"]):
+        return "feature"
+    if any(word in lowered for word in ["рефактор", "refactor"]):
+        return "refactor"
+    if any(word in lowered for word in ["тест", "test", "pytest"]):
+        return "test_update"
+    if any(word in lowered for word in ["readme", "docs", "описание"]):
+        return "docs_update"
     if any(word in lowered for word in ["внешн", "обработк", "отчет", "отчёт", "epf", "erf"]):
         return "external_report_or_processing"
     if any(word in lowered for word in ["миграц", "migration", "alembic", "schema", "схем"]):
@@ -114,6 +174,19 @@ def infer_risk_flags(text: str, task_kind: TaskKind) -> list[str]:
         if any(keyword in lowered for keyword in keywords):
             flags.append(flag)
 
+    business_logic_keywords = {
+        "document": ["document", "документ", "документа"],
+        "posting": ["posting", "проведение", "провести", "проводк"],
+        "register": ["register", "регистр", "регистры", "registers"],
+        "exchange": ["exchange", "обмен", "интеграция", "выгрузк", "загрузк"],
+        "queue": ["queue", "очеред", "отправк"],
+        "pricing": ["pricing", "ценообраз", "цена", "прайс"],
+        "acceptance": ["acceptance", "акцепт", "согласован"],
+    }
+    for flag, keywords in business_logic_keywords.items():
+        if any(keyword in lowered for keyword in keywords):
+            flags.append(flag)
+
     if task_kind == "configuration_change" and "configuration_change" not in flags:
         flags.append("configuration_change")
     if task_kind == "migration" and "migration" not in flags:
@@ -124,12 +197,14 @@ def infer_risk_flags(text: str, task_kind: TaskKind) -> list[str]:
         flags.append("dependencies")
     if task_kind == "security_change" and "security" not in flags:
         flags.append("security")
+    if BUSINESS_LOGIC_RISK_FLAGS & set(flags):
+        flags.append("1c_business_logic")
 
     return list(dict.fromkeys(flags))
 
 
 def infer_risk_level(complexity: Complexity, risk_flags: list[str]) -> RiskLevel:
-    high_risk = {"auth", "payments", "security", "migration", "deployment", "configuration_change"}
+    high_risk = {"auth", "payments", "security", "migration", "deployment", "configuration_change", *BUSINESS_LOGIC_RISK_FLAGS}
     if "deployment" in risk_flags and ("migration" in risk_flags or "security" in risk_flags):
         return "critical"
     if high_risk & set(risk_flags):
@@ -223,6 +298,12 @@ def choose_workflow(
         and workflow.supports_intent(analysis.intent)
         and workflow.supports_task_kind(analysis.task_kind)
     ]
+    business_logic_match = (
+        analysis.risk_level in {"high", "critical"}
+        and bool(BUSINESS_LOGIC_RISK_FLAGS & set(analysis.risk_flags))
+    )
+    if not business_logic_match:
+        eligible = [workflow for workflow in eligible if workflow.id != "1c_business_logic_change"]
 
     if not project_id or analysis.project_confidence < 0.45:
         warnings.append("Project is ambiguous or low-confidence.")
@@ -234,6 +315,16 @@ def choose_workflow(
         if "clarify" in config.workflows:
             return config.workflows["clarify"], warnings
         return None, warnings
+
+    if business_logic_match and "1c_business_logic_change" in config.workflows:
+        workflow = config.workflows["1c_business_logic_change"]
+        if (
+            workflow.supports_project(project_id)
+            and workflow.supports_complexity(analysis.complexity)
+            and workflow.supports_intent(analysis.intent)
+            and workflow.supports_task_kind(analysis.task_kind)
+        ):
+            return workflow, warnings
 
     project_tools = set(config.projects[project_id].tools) if project_id in config.projects else set()
     eligible.sort(

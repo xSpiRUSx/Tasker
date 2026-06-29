@@ -21,6 +21,8 @@ class ValidationResult(BaseModel):
     status: Literal["passed", "failed", "skipped"]
     summary: str
     commands: list[ValidationCommandResult] = Field(default_factory=list)
+    profile: str = "generic"
+    manual_review_required: bool = False
 
 
 class ValidationService:
@@ -30,16 +32,40 @@ class ValidationService:
     def mock_report(self) -> str:
         return "Mock validation passed. No project test commands were executed."
 
-    def run(self, commands: list[str], worktree_path: str | Path | None) -> ValidationResult:
+    def run(
+        self,
+        commands: list[str],
+        worktree_path: str | Path | None,
+        validation_profile: str = "generic",
+    ) -> ValidationResult:
         if not worktree_path:
-            return ValidationResult(status="skipped", summary="No worktree is attached to this task.")
+            return ValidationResult(
+                status="skipped",
+                summary="No worktree is attached to this task.",
+                profile=validation_profile,
+            )
 
         cwd = Path(worktree_path)
         if not cwd.exists():
-            return ValidationResult(status="failed", summary=f"Validation worktree does not exist: {cwd}")
+            return ValidationResult(
+                status="failed",
+                summary=f"Validation worktree does not exist: {cwd}",
+                profile=validation_profile,
+            )
 
         if not commands:
-            return ValidationResult(status="skipped", summary="Project has no configured test_commands.")
+            if validation_profile == "1c":
+                return ValidationResult(
+                    status="skipped",
+                    summary="No configured 1C validator; manual review is required.",
+                    profile=validation_profile,
+                    manual_review_required=True,
+                )
+            return ValidationResult(
+                status="skipped",
+                summary="Project has no configured test_commands.",
+                profile=validation_profile,
+            )
 
         results = [self._run_command(command, cwd) for command in commands]
         failed = [result for result in results if result.status != "passed"]
@@ -48,14 +74,22 @@ class ValidationService:
                 status="failed",
                 summary=f"{len(failed)} of {len(results)} validation command(s) failed.",
                 commands=results,
+                profile=validation_profile,
             )
-        return ValidationResult(status="passed", summary=f"All {len(results)} validation command(s) passed.", commands=results)
+        return ValidationResult(
+            status="passed",
+            summary=f"All {len(results)} validation command(s) passed.",
+            commands=results,
+            profile=validation_profile,
+        )
 
     def markdown_report(self, result: ValidationResult) -> str:
         lines = [
             "# Validation",
             "",
             f"Status: `{result.status}`",
+            f"Profile: `{result.profile}`",
+            f"Manual review required: `{'yes' if result.manual_review_required else 'no'}`",
             "",
             result.summary,
             "",

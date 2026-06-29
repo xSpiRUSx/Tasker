@@ -5,7 +5,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Protocol
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from engineering_orchestrator.harness import ContextBuilder, PromptBuilder
@@ -16,6 +16,7 @@ from engineering_orchestrator.models import (
     ContinueTaskRequest,
     CreateTaskRequest,
     CreateTaskResponse,
+    JobAcceptedResponse,
     RouteDecision,
     Task,
 )
@@ -24,6 +25,7 @@ from engineering_orchestrator.services.artifact_store import ArtifactStore, slug
 from engineering_orchestrator.services.event_service import EventService
 from engineering_orchestrator.services.executor_service import ExecutorService
 from engineering_orchestrator.services.git_service import GitService
+from engineering_orchestrator.services.job_runner import JobRunner
 from engineering_orchestrator.services.planning_service import PlanningService
 from engineering_orchestrator.services.project_registry import ProjectRegistry
 from engineering_orchestrator.services.review_service import ReviewService
@@ -53,6 +55,7 @@ class Orchestrator:
     def __init__(self, settings: Settings, task_router: TaskRouterProtocol | None = None):
         self.settings = settings
         self.task_store = TaskStore(settings.sqlite_path)
+        self.job_runner = JobRunner(self.task_store)
         self.artifact_store = ArtifactStore(settings.artifacts_root, settings.task_folder_template)
         self.event_service = EventService(self.task_store, self.artifact_store)
         self.approval_service = ApprovalService(self.task_store, self.artifact_store)
@@ -114,6 +117,14 @@ class Orchestrator:
     def get_task(self, task_id: str) -> Task:
         return self.task_store.get_task(task_id)
 
+    def get_task_payload(self, task_id: str) -> dict[str, Any]:
+        task = self.task_store.get_task(task_id)
+        payload = task.model_dump(mode="json")
+        payload["current_approval_gate"] = self.task_store.get_current_approval_gate(task.id)
+        payload["runtime"] = self.runtime_summary()
+        payload["latest_job"] = self.latest_job_payload(task.id)
+        return payload
+
     def list_tasks(self, status: str | None = None, project_id: str | None = None, limit: int = 100) -> list[Task]:
         return self.task_store.list_tasks(status, project_id=project_id, limit=limit)  # type: ignore[arg-type]
 
@@ -138,6 +149,8 @@ class Orchestrator:
         for task in tasks:
             item = task.model_dump(mode="json")
             item["current_approval_gate"] = self.task_store.get_current_approval_gate(task.id)
+            item["runtime"] = self.runtime_summary()
+            item["latest_job"] = self.latest_job_payload(task.id)
             items.append(item)
         return {"items": items, "total": total, "limit": limit, "offset": offset}
 
@@ -163,6 +176,29 @@ class Orchestrator:
     def list_runs(self, task_id: str):
         self.task_store.get_task(task_id)
         return self.task_store.list_runs(task_id)
+
+    def list_jobs(self, task_id: str):
+        self.task_store.get_task(task_id)
+        return self.task_store.list_jobs(task_id)
+
+    def get_job(self, job_id: str):
+        return self.task_store.get_job(job_id)
+
+    def latest_job_payload(self, task_id: str) -> dict[str, Any] | None:
+        jobs = self.task_store.list_jobs(task_id)
+        if not jobs:
+            return None
+        return jobs[-1].model_dump(mode="json")
+
+    def runtime_summary(self) -> dict[str, Any]:
+        return {
+            "router": self.settings.router_provider,
+            "planner": self.settings.planner_provider,
+            "executor": self.settings.default_executor,
+            "mode": "dry-run"
+            if "mock" in {self.settings.router_provider, self.settings.planner_provider, self.settings.default_executor}
+            else "live",
+        }
 
     def get_run(self, run_id: str):
         return self.task_store.get_run(run_id)
@@ -203,6 +239,10 @@ class Orchestrator:
 
         if request.decision == "reject":
             self.task_store.resolve_approval(approval.id, "rejected", request.comment)
+            if gate == "diff":
+                self._create_correction_request(task, gate, request.comment)
+                self._add_event(task, "diff_correction_requested", {"comment": request.comment})
+                return self._revise_plan(task_id, request.comment or "Diff was rejected; prepare a focused correction plan.")
             task.status = "plan_rejected" if gate == "plan" else "changes_requested"
             self.task_store.update_task(task)
             self._add_event(task, f"{gate}_approval_rejected", {"comment": request.comment})
@@ -229,6 +269,29 @@ class Orchestrator:
         self.task_store.update_task(task)
         self._write_index(task, "Changes were requested by the user.")
         return self.task_store.get_task(task_id)
+
+    def enqueue_continue_task(self, task_id: str, request: ContinueTaskRequest) -> JobAcceptedResponse:
+        self.task_store.get_task(task_id)
+        job = self.job_runner.enqueue(
+            task_id,
+            "continue_task",
+            lambda: self.continue_task(task_id, request),
+        )
+        return JobAcceptedResponse(job_id=job.id, task_id=task_id, status=job.status, action=job.action)
+
+    def enqueue_approval_decision(
+        self,
+        task_id: str,
+        gate: str,
+        request: ApprovalDecisionRequest,
+    ) -> JobAcceptedResponse:
+        self.task_store.get_task(task_id)
+        job = self.job_runner.enqueue(
+            task_id,
+            f"approval:{gate}:{request.decision}",
+            lambda: self.decide_approval(task_id, gate, request),
+        )
+        return JobAcceptedResponse(job_id=job.id, task_id=task_id, status=job.status, action=job.action)
 
     def _route_task(self, task: Task) -> RouteDecision:
         task.status = "routing"
@@ -447,6 +510,33 @@ class Orchestrator:
         self._write_index(self.task_store.get_task(task.id), "Revised plan is pending approval gate: `plan`.")
         return self.task_store.get_task(task_id)
 
+    def _create_correction_request(self, task: Task, gate: str, comment: str | None):
+        body = comment.strip() if comment and comment.strip() else "No rejection comment was provided."
+        version = self._next_plan_version(task.id)
+        markdown = f"""# Correction request
+
+## Rejected gate
+
+`{gate}`
+
+## User comment
+
+{body}
+
+## Required next step
+
+Create a focused v{version} correction plan from this comment. Preserve unrelated files and previous approved scope unless the comment explicitly changes it.
+"""
+        artifact = self.artifact_store.write_markdown(
+            task,
+            "correction_request",
+            f"Correction request v{version}",
+            markdown,
+            version=version,
+        )
+        self.task_store.add_artifact(artifact)
+        return artifact
+
     def _next_plan_version(self, task_id: str) -> int:
         versions = [
             artifact.version or 0
@@ -555,7 +645,7 @@ class Orchestrator:
             self._execution_markdown(task, result),
         )
         self.task_store.add_artifact(execution)
-        self._write_executor_result_artifacts(task, result)
+        self._write_executor_result_artifacts(task, result, run.id)
         self._add_event(task, "execution_completed", result.model_dump())
         self.task_store.add_step(
             run.id,
@@ -569,7 +659,7 @@ class Orchestrator:
         )
 
         if result.status != "success":
-            task.status = "changes_requested"
+            task.status = "prompt_too_large" if "prompt_too_large" in result.summary else "changes_requested"
             self.task_store.update_task(task)
             validation = self.artifact_store.write_markdown(
                 task,
@@ -900,10 +990,15 @@ Status: `{result.status}`
 - Max diff bytes: `{self.projects.max_diff_bytes(task.project_id)}`
 """
 
-    def _write_executor_result_artifacts(self, task: Task, result) -> None:
+    def _write_executor_result_artifacts(self, task: Task, result, run_id: str) -> None:
         if result.prompt:
             self.task_store.add_artifact(
-                self.artifact_store.write_markdown(task, "executor_prompt", "Executor prompt", result.prompt)
+                self.artifact_store.write_markdown(
+                    task,
+                    "executor_prompt",
+                    "Executor prompt",
+                    self._runtime_artifact_markdown(task, run_id, "prompt.txt", result.prompt),
+                )
             )
         if result.command:
             command_text = " ".join(result.command)
@@ -921,7 +1016,7 @@ Status: `{result.status}`
                     task,
                     "executor_stdout",
                     "Executor stdout",
-                    f"# Executor stdout\n\n```text\n{result.stdout.strip() or '(empty)'}\n```\n",
+                    self._runtime_artifact_markdown(task, run_id, "stdout.txt", result.stdout),
                 )
             )
         if result.stderr or self.settings.default_executor == "codex":
@@ -930,9 +1025,32 @@ Status: `{result.status}`
                     task,
                     "executor_stderr",
                     "Executor stderr",
-                    f"# Executor stderr\n\n```text\n{result.stderr.strip() or '(empty)'}\n```\n",
+                    self._runtime_artifact_markdown(task, run_id, "stderr.txt", result.stderr),
                 )
             )
+
+    def _runtime_artifact_markdown(self, task: Task, run_id: str, filename: str, content: str) -> str:
+        runtime_dir = self.settings.artifacts_root.parent / "runtime" / task.id / run_id
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        runtime_path = runtime_dir / filename
+        runtime_path.write_text(content or "", encoding="utf-8")
+        preview = (content or "").strip()
+        if len(preview) > 4000:
+            preview = preview[:4000] + "\n\n[Preview truncated; open the runtime file for full content.]"
+        if not preview:
+            preview = "(empty)"
+        return f"""# Runtime artifact
+
+Full content: `runtime://{task.id}/{run_id}/{filename}`
+
+Filesystem path: `{runtime_path}`
+
+## Preview
+
+```text
+{preview}
+```
+"""
 
     def _run_validation(self, task: Task):
         if not self.settings.run_tests_after_execution:
@@ -940,7 +1058,8 @@ Status: `{result.status}`
 
             return ValidationResult(status="skipped", summary="Validation is disabled by orchestrator settings.")
         commands = self.projects.test_commands(task.project_id)
-        return self.validation_service.run(commands, task.worktree_path)
+        profile = self.projects.validation_profile(task.project_id)
+        return self.validation_service.run(commands, task.worktree_path, validation_profile=profile)
 
     def _write_validation_command_outputs(self, task: Task, validation_result) -> None:
         existing_versions = [
@@ -1494,7 +1613,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/tasks/{task_id}")
     def get_task(task_id: str):
         try:
-            return orchestrator.get_task(task_id)
+            return orchestrator.get_task_payload(task_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -1564,6 +1683,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @app.get("/tasks/{task_id}/jobs")
+    def list_jobs(task_id: str):
+        try:
+            return {"items": orchestrator.list_jobs(task_id)}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/jobs/{job_id}")
+    def get_job(job_id: str):
+        try:
+            return orchestrator.get_job(job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.get("/runs/{run_id}")
     def get_run(run_id: str):
         try:
@@ -1578,17 +1711,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    @app.post("/tasks/{task_id}/approvals/{gate}")
+    @app.post("/tasks/{task_id}/approvals/{gate}", status_code=status.HTTP_202_ACCEPTED)
     def decide_approval(task_id: str, gate: str, request: ApprovalDecisionRequest):
         try:
-            return orchestrator.decide_approval(task_id, gate, request)
+            return orchestrator.enqueue_approval_decision(task_id, gate, request)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    @app.post("/tasks/{task_id}/messages")
+    @app.post("/tasks/{task_id}/messages", status_code=status.HTTP_202_ACCEPTED)
     def continue_task(task_id: str, request: ContinueTaskRequest):
         try:
-            return orchestrator.continue_task(task_id, request)
+            return orchestrator.enqueue_continue_task(task_id, request)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

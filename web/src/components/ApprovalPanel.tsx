@@ -34,8 +34,9 @@ export function ApprovalPanel({ approvals, busy, onRefresh, setError, setToast, 
     }
     setLoading(decision);
     try {
-      await decideApproval(taskId, pending.gate, { decision, comment: comment.trim() || null });
-      setToast(`${pending.gate} ${decision === "approve" ? "approved" : "rejected"}`);
+      const job = await decideApproval(taskId, pending.gate, { decision, comment: comment.trim() || null });
+      const action = decision === "approve" ? "approved" : "rejected";
+      setToast(`${pending.gate} ${action}; ${job.action} queued`);
       setComment("");
       await onRefresh();
     } catch (error) {
@@ -60,6 +61,9 @@ export function ApprovalPanel({ approvals, busy, onRefresh, setError, setToast, 
             <dt>artifact_ids</dt>
             <dd>{pending.artifact_ids.join(", ") || "none"}</dd>
           </dl>
+          <p className="approval-note">
+            Approving this gate can immediately open the next required gate.
+          </p>
           <pre className="json-block">{JSON.stringify(pending.requested_payload, null, 2)}</pre>
           <textarea value={comment} onChange={(event) => setComment(event.target.value)} placeholder="comment" rows={4} />
           <div className="button-row">

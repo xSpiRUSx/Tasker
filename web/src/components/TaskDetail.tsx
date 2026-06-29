@@ -85,7 +85,7 @@ export function TaskDetail({ approvals, busy, onCancel, onCorrection, onRefresh,
               setToast={setToast}
               taskId={selectedTask.id}
             />
-            <CorrectionPanel busy={busy} onCorrection={onCorrection} />
+            <CorrectionPanel busy={busy} onCorrection={onCorrection} task={selectedTask} />
           </div>
         </section>
       ) : null}

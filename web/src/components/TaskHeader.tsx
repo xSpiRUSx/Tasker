@@ -24,9 +24,14 @@ export function TaskHeader({ busy, onCancel, task }: TaskHeaderProps) {
           <StatusBadge status={task.status} />
         </div>
         <dl className="task-header__meta">
+          <Meta label="router" value={task.runtime?.router} />
+          <Meta label="planner" value={task.runtime?.planner} />
+          <Meta label="executor" value={task.runtime?.executor} />
+          <Meta label="mode" value={task.runtime?.mode} />
           <Meta label="project" value={task.project_id} />
           <Meta label="workflow" value={task.workflow_id} />
           <Meta label="risk" value={task.risk_level} />
+          <Meta label="job" value={task.latest_job ? `${task.latest_job.action} / ${task.latest_job.status}` : null} />
           <Meta label="branch" value={task.branch_name} />
           <Meta label="worktree" value={task.worktree_path} />
           <Meta label="artifacts" value={task.artifacts_dir} />
@@ -34,6 +39,12 @@ export function TaskHeader({ busy, onCancel, task }: TaskHeaderProps) {
           <Meta label="updated" value={formatDate(task.updated_at)} />
           <Meta label="closed" value={formatDate(task.closed_at)} />
         </dl>
+        {task.runtime?.mode === "dry-run" ? (
+          <p className="task-header__warning">Plan or execution uses mock mode. Regenerate with live providers before approving live execution.</p>
+        ) : null}
+        {task.status === "prompt_too_large" ? (
+          <p className="task-header__warning">Executor context exceeded the prompt budget. Compact context before retrying execution.</p>
+        ) : null}
       </div>
       <div className="task-header__actions">
         <button type="button" onClick={() => window.location.reload()} title="Reload app">

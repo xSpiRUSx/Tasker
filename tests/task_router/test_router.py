@@ -37,7 +37,7 @@ def test_config_has_two_projects_and_two_workflows():
     config = load_router_config(ROOT / "config" / "projects.yml", ROOT / "config" / "workflows.yml")
 
     assert list(config.projects) == ["solvix_zn", "sq_erp_ext"]
-    assert list(config.workflows) == ["simple_question", "simple_external_development"]
+    assert list(config.workflows) == ["simple_question", "1c_business_logic_change", "simple_external_development"]
     assert config.projects["sq_erp_ext"].tools == ["codex", "1c-graph-metadata-mcp"]
 
 
@@ -72,6 +72,27 @@ def test_mock_routes_simple_processing_to_external_development():
     assert state["result"].approval_gates == ["plan", "diff", "commit"]
 
 
+def test_high_risk_1c_business_logic_does_not_use_simple_workflow():
+    os.environ["TASK_ROUTER_MOCK_LLM"] = "1"
+    config = load_router_config(ROOT / "config" / "projects.yml", ROOT / "config" / "workflows.yml")
+    app = build_graph(config)
+
+    state = app.invoke(
+        {
+            "input_text": (
+                "sq_erp_ext: реализуй изменение документа заказа, "
+                "проведение, очередь отправки, обмен и ценообразование."
+            )
+        }
+    )
+
+    assert state["result"].project_id == "sq_erp_ext"
+    assert state["result"].risk_level == "high"
+    assert "1c_business_logic" in state["result"].risk_flags
+    assert state["result"].workflow_id == "1c_business_logic_change"
+    assert state["result"].workflow_id != "simple_external_development"
+
+
 def test_mock_returns_no_workflow_for_configuration_change():
     os.environ["TASK_ROUTER_MOCK_LLM"] = "1"
     config = load_router_config(ROOT / "config" / "projects.yml", ROOT / "config" / "workflows.yml")
@@ -102,6 +123,40 @@ def test_project_inference_does_not_match_empty_path():
 
     assert project_id is None
     assert confidence == 0.0
+
+
+def test_project_inference_ignores_generic_dot_path_for_specific_alias():
+    config = RouterConfig(
+        tools={"codex": ToolConfig(id="codex", name="Codex", type="llm", description="LLM")},
+        projects={
+            "generic": ProjectConfig(
+                id="generic",
+                name="Generic Project",
+                path=".",
+                aliases=["default"],
+                description="Fallback project",
+                tools=["codex"],
+            ),
+            "sq_erp_ext": ProjectConfig(
+                id="sq_erp_ext",
+                name="Snow Queen ERP",
+                path=r"C:\Configuration\SQ_ERP\ERP_Ext",
+                aliases=["\u0441\u043d\u0435\u0436\u043d\u0430\u044f \u043a\u043e\u0440\u043e\u043b\u0435\u0432\u0430"],
+                description="Specific project",
+                tools=["codex"],
+            ),
+        },
+        workflows={},
+    )
+
+    project_id, confidence = infer_project_id(
+        "\u0420\u0435\u0430\u043b\u0438\u0437\u0443\u0439 \u0437\u0430\u0434\u0430\u0447\u0443 \u0432 \u043f\u0440\u043e\u0435\u043a\u0442\u0435 "
+        "\u0441\u043d\u0435\u0436\u043d\u0430\u044f \u043a\u043e\u0440\u043e\u043b\u0435\u0432\u0430.",
+        config,
+    )
+
+    assert project_id == "sq_erp_ext"
+    assert confidence > 0.0
 
 
 def test_unknown_is_not_workflow_wildcard():

@@ -25,6 +25,7 @@ export type TaskStatus =
   | "awaiting_deploy_approval"
   | "closed"
   | "failed"
+  | "prompt_too_large"
   | "cancelled";
 
 export interface HealthResponse {
@@ -52,6 +53,26 @@ export interface Task {
   updated_at: string;
   closed_at?: string | null;
   current_approval_gate?: string | null;
+  runtime?: RuntimeSummary;
+  latest_job?: TaskJob | null;
+}
+
+export interface RuntimeSummary {
+  router: string;
+  planner: string;
+  executor: string;
+  mode: "dry-run" | "live" | string;
+}
+
+export interface TaskJob {
+  id: string;
+  task_id: string;
+  action: string;
+  status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | string;
+  error?: string | null;
+  created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
 }
 
 export interface TaskArtifact {
@@ -120,6 +141,14 @@ export interface CreateTaskResponse {
   workflow_id?: string | null;
   artifacts_dir?: string | null;
   current_approval_gate?: string | null;
+}
+
+export interface JobAcceptedResponse {
+  accepted: boolean;
+  job_id: string;
+  task_id: string;
+  status: string;
+  action: string;
 }
 
 export interface ListTasksParams {

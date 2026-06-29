@@ -39,7 +39,7 @@ const STATUS_GROUPS: Record<string, string[]> = {
     "committing",
     "deploy_prep",
   ],
-  "group:changes": ["plan_rejected", "changes_requested", "awaiting_clarification"],
+  "group:changes": ["plan_rejected", "changes_requested", "prompt_too_large", "awaiting_clarification"],
   "group:failed": ["failed", "validation_failed"],
 };
 
@@ -155,8 +155,8 @@ export default function App() {
     }
     setBusy("correction");
     try {
-      await sendTaskMessage(selectedTaskId, message);
-      setToast("Message sent");
+      const job = await sendTaskMessage(selectedTaskId, message);
+      setToast(`Message accepted; ${job.action} queued`);
       await refresh();
     } catch (error) {
       setError(error instanceof Error ? error.message : "Message send failed");

@@ -158,6 +158,48 @@ def test_reject_plan_and_message_creates_v2_plan(tmp_path):
     assert approval.requested_payload["plan_version"] == 2
 
 
+def test_reject_diff_creates_correction_request_and_vnext_plan(tmp_path):
+    orchestrator = Orchestrator(make_settings(tmp_path))
+    response = orchestrator.create_task(CreateTaskRequest(message="Fix billing-api login bug"))
+
+    task = orchestrator.decide_approval(response.task_id, "plan", ApprovalDecisionRequest(decision="approve"))
+    assert task.status == "awaiting_diff_approval"
+
+    task = orchestrator.decide_approval(
+        response.task_id,
+        "diff",
+        ApprovalDecisionRequest(decision="reject", comment="Limit the diff to auth.py"),
+    )
+
+    assert task.status == "awaiting_plan_approval"
+    assert orchestrator.task_store.get_artifact(task.id, "correction_request", version=2) is not None
+    assert orchestrator.task_store.get_artifact(task.id, "todo", version=2) is not None
+    approval = orchestrator.task_store.get_pending_approval(task.id, "plan")
+    assert approval is not None
+    assert approval.requested_payload["plan_version"] == 2
+
+
+def test_1c_validation_without_validator_is_skipped_manual_review(tmp_path):
+    orchestrator = Orchestrator(make_settings(tmp_path))
+    orchestrator.projects.projects[0]["validation_profile"] = "1c"
+    orchestrator.projects.projects[0]["test_commands"] = []
+    response = orchestrator.create_task(CreateTaskRequest(message="Fix billing-api login bug"))
+
+    task = orchestrator.task_store.get_task(response.task_id)
+    task.worktree_path = str(tmp_path)
+    orchestrator.task_store.update_task(task)
+
+    task = orchestrator.decide_approval(response.task_id, "plan", ApprovalDecisionRequest(decision="approve"))
+
+    assert task.status == "awaiting_diff_approval"
+    validation = orchestrator.task_store.get_artifact(task.id, "validation_report")
+    assert validation is not None
+    report = orchestrator.artifact_store.read_text(validation)
+    assert "Status: `skipped`" in report
+    assert "Profile: `1c`" in report
+    assert "Manual review required: `yes`" in report
+
+
 def test_validation_failure_stops_before_diff_approval(tmp_path):
     orchestrator = Orchestrator(make_settings(tmp_path))
     orchestrator.projects.projects[0]["test_commands"] = ["python -c \"import sys; print('failed validation'); sys.exit(5)\""]

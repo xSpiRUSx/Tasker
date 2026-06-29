@@ -63,8 +63,7 @@ projects:
     metadata_root: src/cfe
     external_artifacts_root: external
     validation_profile: 1c
-    test_commands:
-      - python -m pytest
+    test_commands: []
     blocked_paths:
       - .env
       - .env.*
@@ -92,8 +91,7 @@ projects:
     metadata_root: src/cfe
     external_artifacts_root: external
     validation_profile: 1c
-    test_commands:
-      - python -m pytest
+    test_commands: []
     blocked_paths:
       - .env
       - .env.*

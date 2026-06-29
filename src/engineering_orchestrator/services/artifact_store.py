@@ -36,6 +36,8 @@ FILENAME_BY_KIND: dict[str, str] = {
     "run_report_json": "07-run.json",
     "evaluation_report": "08-evaluation.md",
     "repair_prompt": "08-repair-prompt.md",
+    "correction_request": "07-correction-request.v{version}.md",
+    "correction_context": "07-correction-context.v{version}.md",
     "diagnosis": "09-diagnosis.md",
     "review_report": "09-review.md",
     "diff_summary": "10-diff-summary.md",

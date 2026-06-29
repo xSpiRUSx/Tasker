@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { listArtifacts, readArtifactById } from "../api/client";
 import type { ArtifactContentResponse, TaskArtifact } from "../api/types";
+import { formatDate } from "../i18n";
 import { ArtifactViewer } from "./ArtifactViewer";
 
 interface TaskArtifactsProps {
@@ -56,7 +57,7 @@ export function TaskArtifacts({ setError, taskId }: TaskArtifactsProps) {
       setSelectedArtifactId((current) => current || response.items[0]?.id || null);
       setError(null);
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Loading artifacts failed");
+      setError(error instanceof Error ? error.message : "Не удалось загрузить артефакты");
     } finally {
       setLoading(false);
     }
@@ -71,7 +72,7 @@ export function TaskArtifacts({ setError, taskId }: TaskArtifactsProps) {
       setContent(await readArtifactById(taskId, selectedArtifactId));
       setError(null);
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Loading artifact failed");
+      setError(error instanceof Error ? error.message : "Не удалось загрузить артефакт");
     }
   }, [selectedArtifactId, setError, taskId]);
 
@@ -93,12 +94,12 @@ export function TaskArtifacts({ setError, taskId }: TaskArtifactsProps) {
     <section className="artifact-tab">
       <div className="artifact-list panel">
         <div className="section-title">
-          <h2>Artifacts</h2>
-          <button className="icon-button" type="button" onClick={() => void loadArtifacts()} title="Refresh artifacts">
+          <h2>Артефакты</h2>
+          <button className="icon-button" type="button" onClick={() => void loadArtifacts()} title="Обновить артефакты">
             <RefreshCw size={16} />
           </button>
         </div>
-        {loading ? <div className="empty">Loading artifacts...</div> : null}
+        {loading ? <div className="empty">Загружаю артефакты...</div> : null}
         {sortedArtifacts.map((artifact) => (
           <button
             className={artifact.id === selectedArtifactId ? "artifact-item artifact-item--selected" : "artifact-item"}
@@ -112,7 +113,7 @@ export function TaskArtifacts({ setError, taskId }: TaskArtifactsProps) {
               {artifact.version ? ` v${artifact.version}` : ""}
             </span>
             <small>{artifact.relative_path}</small>
-            <small>{new Date(artifact.updated_at).toLocaleString()}</small>
+            <small>{formatDate(artifact.updated_at)}</small>
           </button>
         ))}
       </div>

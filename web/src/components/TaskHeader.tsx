@@ -1,5 +1,6 @@
 import { Ban, RefreshCw } from "lucide-react";
 import type { Task } from "../api/types";
+import { displayValue, formatDate } from "../i18n";
 import { StatusBadge } from "./StatusBadge";
 
 interface TaskHeaderProps {
@@ -10,9 +11,9 @@ interface TaskHeaderProps {
 
 export function TaskHeader({ busy, onCancel, task }: TaskHeaderProps) {
   async function cancel() {
-    const comment = window.prompt(`Cancel ${task.id}?`, "Cancelled by user");
+    const comment = window.prompt(`Отменить ${task.id}?`, "Отменено пользователем");
     if (comment === null) return;
-    if (!window.confirm(`You are cancelling ${task.id}. Pending approvals will be cancelled.`)) return;
+    if (!window.confirm(`Задача ${task.id} будет отменена вместе с ожидающими approvals.`)) return;
     await onCancel(comment);
   }
 
@@ -40,19 +41,19 @@ export function TaskHeader({ busy, onCancel, task }: TaskHeaderProps) {
           <Meta label="closed" value={formatDate(task.closed_at)} />
         </dl>
         {task.runtime?.mode === "dry-run" ? (
-          <p className="task-header__warning">Plan or execution uses mock mode. Regenerate with live providers before approving live execution.</p>
+          <p className="task-header__warning">План или выполнение используют mock-режим. Перед live-выполнением пересоберите задачу с реальными провайдерами.</p>
         ) : null}
         {task.status === "prompt_too_large" ? (
-          <p className="task-header__warning">Executor context exceeded the prompt budget. Compact context before retrying execution.</p>
+          <p className="task-header__warning">Контекст исполнителя превысил бюджет. Перед повтором нужно сжать контекст.</p>
         ) : null}
       </div>
       <div className="task-header__actions">
-        <button type="button" onClick={() => window.location.reload()} title="Reload app">
+        <button type="button" onClick={() => window.location.reload()} title="Обновить приложение">
           <RefreshCw size={16} />
         </button>
         <button type="button" disabled={busy === "cancel" || task.status === "closed" || task.status === "cancelled"} onClick={() => void cancel()}>
           <Ban size={16} />
-          {busy === "cancel" ? "Cancelling..." : "Cancel"}
+          {busy === "cancel" ? "Отменяю..." : "Отменить"}
         </button>
       </div>
     </section>
@@ -63,11 +64,7 @@ function Meta({ label, value }: { label: string; value?: string | null }) {
   return (
     <>
       <dt>{label}</dt>
-      <dd>{value || "none"}</dd>
+      <dd>{displayValue(value)}</dd>
     </>
   );
-}
-
-function formatDate(value?: string | null) {
-  return value ? new Date(value).toLocaleString() : "none";
 }

@@ -10,10 +10,12 @@ import {
   sendTaskMessage,
 } from "./api/client";
 import type { Approval, ListTasksParams, RouteDecision, Task } from "./api/types";
-import { AppShell } from "./components/AppShell";
+import { AppShell, type AppView } from "./components/AppShell";
+import { ConfigEditor } from "./components/ConfigEditor";
 import { RoutingRulesSettings } from "./components/RoutingRulesSettings";
-import { Sidebar } from "./components/Sidebar";
+import { TaskCreateForm } from "./components/TaskCreateForm";
 import { TaskDetail } from "./components/TaskDetail";
+import { TaskList } from "./components/TaskList";
 
 const POLL_INTERVAL_MS = Number(import.meta.env.VITE_POLL_INTERVAL_MS || 3000);
 const STATUS_GROUPS: Record<string, string[]> = {
@@ -49,6 +51,7 @@ const STATUS_GROUPS: Record<string, string[]> = {
 
 export default function App() {
   const [apiHealthy, setApiHealthy] = useState(false);
+  const [view, setView] = useState<AppView>(() => viewFromPath(window.location.pathname));
   const [tasks, setTasks] = useState<Task[]>([]);
   const [total, setTotal] = useState(0);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -61,7 +64,6 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>(null);
 
   const localStatusFilter = useMemo(() => filters.status || "", [filters.status]);
-  const isRoutingSettings = window.location.pathname === "/settings/routing-rules";
 
   const loadHealth = useCallback(async () => {
     try {
@@ -109,7 +111,7 @@ export default function App() {
       await Promise.all([loadHealth(), loadTasks(), loadSelectedTask()]);
       setError(null);
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Refresh failed");
+      setError(error instanceof Error ? error.message : "Не удалось обновить данные");
     }
   }, [loadHealth, loadSelectedTask, loadTasks]);
 
@@ -127,13 +129,27 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
+  useEffect(() => {
+    const onPopState = () => setView(viewFromPath(window.location.pathname));
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  function navigate(nextView: AppView) {
+    const nextPath = pathForView(nextView);
+    if (window.location.pathname !== nextPath) {
+      window.history.pushState({}, "", nextPath);
+    }
+    setView(nextView);
+  }
+
   async function handlePreview(message: string) {
     setBusy("preview");
     try {
       setRoutePreview(await routeTask(message));
       setError(null);
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Route preview failed");
+      setError(error instanceof Error ? error.message : "Не удалось построить маршрут");
     } finally {
       setBusy(null);
     }
@@ -144,11 +160,12 @@ export default function App() {
     try {
       const response = await createTask(input);
       setSelectedTaskId(response.task_id);
-      setToast(`Task ${response.task_id} created`);
+      setToast(`Задача ${response.task_id} создана`);
       setRoutePreview(null);
+      navigate("tasks");
       await refresh();
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Task creation failed");
+      setError(error instanceof Error ? error.message : "Не удалось создать задачу");
     } finally {
       setBusy(null);
     }
@@ -161,10 +178,10 @@ export default function App() {
     setBusy("correction");
     try {
       const job = await sendTaskMessage(selectedTaskId, message);
-      setToast(`Message accepted; ${job.action} queued`);
+      setToast(`Сообщение принято; ${job.action} в очереди`);
       await refresh();
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Message send failed");
+      setError(error instanceof Error ? error.message : "Не удалось отправить сообщение");
     } finally {
       setBusy(null);
     }
@@ -177,33 +194,52 @@ export default function App() {
     setBusy("cancel");
     try {
       await cancelTask(selectedTaskId, comment);
-      setToast("Task cancelled");
+      setToast("Задача отменена");
       await refresh();
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Cancel failed");
+      setError(error instanceof Error ? error.message : "Не удалось отменить задачу");
     } finally {
       setBusy(null);
     }
   }
 
   return (
-    <AppShell apiHealthy={apiHealthy} error={error} toast={toast} onDismissError={() => setError(null)}>
-      {isRoutingSettings ? (
+    <AppShell
+      apiHealthy={apiHealthy}
+      currentView={view}
+      error={error}
+      layoutMode={view === "tasks" ? "split" : "single"}
+      toast={toast}
+      onDismissError={() => setError(null)}
+      onNavigate={navigate}
+    >
+      {view === "routing" ? (
         <RoutingRulesSettings setError={setError} setToast={setToast} />
-      ) : (
-        <>
-          <Sidebar
+      ) : null}
+      {view === "config" ? <ConfigEditor setError={setError} setToast={setToast} /> : null}
+      {view === "create" ? (
+        <main className="main create-main">
+          <TaskCreateForm
             busy={busy}
-            filters={filters}
+            layout="page"
             onCreate={handleCreate}
             onPreview={handlePreview}
-            onSelectTask={setSelectedTaskId}
-            onSetFilters={setFilters}
             routePreview={routePreview}
-            selectedTaskId={selectedTaskId}
-            tasks={tasks}
-            total={total}
           />
+        </main>
+      ) : null}
+      {view === "tasks" ? (
+        <>
+          <aside className="sidebar">
+            <TaskList
+              filters={filters}
+              onSelectTask={setSelectedTaskId}
+              onSetFilters={setFilters}
+              selectedTaskId={selectedTaskId}
+              tasks={tasks}
+              total={total}
+            />
+          </aside>
           <TaskDetail
             approvals={approvals}
             busy={busy}
@@ -215,7 +251,22 @@ export default function App() {
             setToast={setToast}
           />
         </>
-      )}
+      ) : null}
     </AppShell>
   );
+}
+
+function viewFromPath(pathname: string): AppView {
+  if (pathname === "/settings/routing-rules") return "routing";
+  if (pathname === "/settings/config") return "config";
+  if (pathname === "/tasks/new") return "create";
+  if (pathname === "/tasks" || pathname.startsWith("/tasks/")) return "tasks";
+  return "create";
+}
+
+function pathForView(view: AppView): string {
+  if (view === "routing") return "/settings/routing-rules";
+  if (view === "config") return "/settings/config";
+  if (view === "tasks") return "/tasks";
+  return "/tasks/new";
 }

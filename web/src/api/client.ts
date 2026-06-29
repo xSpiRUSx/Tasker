@@ -14,6 +14,7 @@ import type {
   ListTasksResponse,
   ModelDecision,
   PromptBuild,
+  RouterConfigDocument,
   RouteDecision,
   RoutingRule,
   RoutingSuggestion,
@@ -238,4 +239,15 @@ export function promoteRoutingSuggestion(suggestionId: string): Promise<RoutingS
 
 export function rejectRoutingSuggestion(suggestionId: string): Promise<RoutingSuggestion> {
   return request<RoutingSuggestion>(`/routing/suggestions/${encodeURIComponent(suggestionId)}/reject`, { method: "POST" });
+}
+
+export function getRouterConfig(): Promise<RouterConfigDocument> {
+  return request<RouterConfigDocument>("/config/router");
+}
+
+export function saveRouterConfig(input: RouterConfigDocument): Promise<RouterConfigDocument> {
+  return request<RouterConfigDocument>("/config/router", {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
 }

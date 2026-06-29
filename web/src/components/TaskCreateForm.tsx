@@ -4,12 +4,13 @@ import type { RouteDecision } from "../api/types";
 
 interface TaskCreateFormProps {
   busy: string | null;
+  layout?: "compact" | "page";
   onCreate: (input: { message: string; source?: string | null; user_id?: string | null }) => Promise<void>;
   onPreview: (message: string) => Promise<void>;
   routePreview: RouteDecision | null;
 }
 
-export function TaskCreateForm({ busy, onCreate, onPreview, routePreview }: TaskCreateFormProps) {
+export function TaskCreateForm({ busy, layout = "compact", onCreate, onPreview, routePreview }: TaskCreateFormProps) {
   const [message, setMessage] = useState("");
   const [source, setSource] = useState("web");
   const [userId, setUserId] = useState("");
@@ -23,8 +24,8 @@ export function TaskCreateForm({ busy, onCreate, onPreview, routePreview }: Task
   }
 
   return (
-    <section className="panel new-task">
-      <h2>New Task</h2>
+    <section className={layout === "page" ? "panel new-task new-task--page" : "panel new-task"}>
+      <h2>Новая задача</h2>
       <textarea
         value={message}
         onChange={(event) => setMessage(event.target.value)}
@@ -33,21 +34,21 @@ export function TaskCreateForm({ busy, onCreate, onPreview, routePreview }: Task
             void submit();
           }
         }}
-        placeholder="Task message"
-        rows={5}
+        placeholder="Опишите задачу"
+        rows={layout === "page" ? 9 : 5}
       />
       <div className="field-grid">
-        <input value={source} onChange={(event) => setSource(event.target.value)} placeholder="source" />
-        <input value={userId} onChange={(event) => setUserId(event.target.value)} placeholder="user_id" />
+        <input value={source} onChange={(event) => setSource(event.target.value)} placeholder="Источник" />
+        <input value={userId} onChange={(event) => setUserId(event.target.value)} placeholder="Пользователь" />
       </div>
       <div className="button-row">
         <button type="button" disabled={!canSubmit || busy === "preview"} onClick={() => void onPreview(message.trim())}>
           <Eye size={16} />
-          {busy === "preview" ? "Previewing..." : "Preview route"}
+          {busy === "preview" ? "Строю маршрут..." : "Проверить маршрут"}
         </button>
         <button type="button" disabled={!canSubmit || busy === "create"} onClick={() => void submit()}>
           <Plus size={16} />
-          {busy === "create" ? "Creating..." : "Create task"}
+          {busy === "create" ? "Создаю..." : "Создать задачу"}
         </button>
       </div>
       {routePreview ? (
@@ -73,7 +74,7 @@ function Row({ label, value }: { label: string; value: unknown }) {
   return (
     <>
       <dt>{label}</dt>
-      <dd>{String(value || "none")}</dd>
+      <dd>{String(value || "нет")}</dd>
     </>
   );
 }

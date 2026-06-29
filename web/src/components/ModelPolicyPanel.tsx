@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { listModelDecisions } from "../api/client";
 import type { ModelDecision } from "../api/types";
+import { displayValue } from "../i18n";
 
 interface ModelPolicyPanelProps {
   setError: (message: string | null) => void;
@@ -16,7 +17,7 @@ export function ModelPolicyPanel({ setError, taskId }: ModelPolicyPanelProps) {
         const response = await listModelDecisions(taskId);
         setItems(response.items);
       } catch (error) {
-        setError(error instanceof Error ? error.message : "Model decisions load failed");
+        setError(error instanceof Error ? error.message : "Не удалось загрузить model decisions");
       }
     }
     void load();
@@ -24,7 +25,7 @@ export function ModelPolicyPanel({ setError, taskId }: ModelPolicyPanelProps) {
 
   return (
     <section className="panel">
-      <h2>Model policy</h2>
+      <h2>Модель</h2>
       {items.length ? (
         <div className="timeline">
           {items.slice(-5).map((item) => (
@@ -38,15 +39,15 @@ export function ModelPolicyPanel({ setError, taskId }: ModelPolicyPanelProps) {
                 <dt>Model</dt>
                 <dd>{item.model}</dd>
                 <dt>Reasoning</dt>
-                <dd>{item.reasoning_effort || "none"}</dd>
-                <dt>Reason</dt>
+                <dd>{displayValue(item.reasoning_effort)}</dd>
+                <dt>Причина</dt>
                 <dd>{item.reason}</dd>
               </dl>
             </div>
           ))}
         </div>
       ) : (
-        <div className="empty">No model decisions recorded.</div>
+        <div className="empty">Модельные решения пока не записаны.</div>
       )}
     </section>
   );

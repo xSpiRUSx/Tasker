@@ -9,6 +9,7 @@ import { JobsPanel } from "./JobsPanel";
 import { ModelPolicyPanel } from "./ModelPolicyPanel";
 import { PromptReportPanel } from "./PromptReportPanel";
 import { RunsPanel } from "./RunsPanel";
+import { displayValue, gateLabel } from "../i18n";
 import { StatusBadge } from "./StatusBadge";
 import { TaskArtifacts } from "./TaskArtifacts";
 import { TaskHeader } from "./TaskHeader";
@@ -27,12 +28,12 @@ interface TaskDetailProps {
 }
 
 const TABS: { id: Tab; label: string }[] = [
-  { id: "overview", label: "Overview" },
-  { id: "artifacts", label: "Artifacts" },
+  { id: "overview", label: "Обзор" },
+  { id: "artifacts", label: "Артефакты" },
   { id: "approvals", label: "Approvals" },
-  { id: "events", label: "Events" },
-  { id: "runs", label: "Runs" },
-  { id: "raw", label: "Raw JSON" },
+  { id: "events", label: "События" },
+  { id: "runs", label: "Запуски" },
+  { id: "raw", label: "JSON" },
 ];
 
 export function TaskDetail({ approvals, busy, onCancel, onCorrection, onRefresh, selectedTask, setError, setToast }: TaskDetailProps) {
@@ -41,7 +42,7 @@ export function TaskDetail({ approvals, busy, onCancel, onCorrection, onRefresh,
   if (!selectedTask) {
     return (
       <main className="main empty-main">
-        <div>Select or create a task.</div>
+        <div>Выберите или создайте задачу.</div>
       </main>
     );
   }
@@ -67,39 +68,39 @@ export function TaskDetail({ approvals, busy, onCancel, onCorrection, onRefresh,
       {tab === "overview" ? (
         <section className="detail-grid">
           <div className="panel overview">
-            <h2>Overview</h2>
+            <h2>Обзор</h2>
             <p className="message">{selectedTask.user_message}</p>
             <dl className="kv">
-              <dt>Status</dt>
+              <dt>Статус</dt>
               <dd>
                 <StatusBadge status={selectedTask.status} />
               </dd>
-              <dt>Pending gate</dt>
-              <dd>{pendingApproval?.gate || "none"}</dd>
-              <dt>Route</dt>
+              <dt>Текущий gate</dt>
+              <dd>{gateLabel(pendingApproval?.gate)}</dd>
+              <dt>Маршрут</dt>
               <dd>
-                {selectedTask.project_id || "unknown"} / {selectedTask.workflow_id || "unknown"}
+                {displayValue(selectedTask.project_id)} / {displayValue(selectedTask.workflow_id)}
               </dd>
-              <dt>Parent task</dt>
-              <dd>{selectedTask.parent_task_id || "none"}</dd>
-              <dt>Correction</dt>
+              <dt>Родительская задача</dt>
+              <dd>{displayValue(selectedTask.parent_task_id)}</dd>
+              <dt>Правка</dt>
               <dd>
                 {selectedTask.correction_source
                   ? `${String(correctionMode || "correction")} / ${selectedTask.correction_source}`
-                  : "none"}
+                  : "нет"}
               </dd>
-              <dt>Risk</dt>
-              <dd>{selectedTask.risk_level || "unknown"}</dd>
+              <dt>Риск</dt>
+              <dd>{displayValue(selectedTask.risk_level)}</dd>
             </dl>
             {selectedTask.workflow_id === "task_correction" ? (
               <p className="task-header__warning">
-                No full plan required. Final diff approval will still be required.
+                Полный план не требуется. Финальное approval diff все равно останется обязательным.
               </p>
             ) : null}
             {manualReviewRequired ? (
-              <p className="task-header__warning">1C validation skipped. Manual review required.</p>
+              <p className="task-header__warning">1C-проверка пропущена. Нужна ручная проверка.</p>
             ) : null}
-            <h3>Route decision</h3>
+            <h3>Решение маршрутизатора</h3>
             <pre className="json-block">{JSON.stringify(routeDecision, null, 2)}</pre>
           </div>
           <div className="action-stack">

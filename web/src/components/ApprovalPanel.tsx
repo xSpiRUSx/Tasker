@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Check, Play, ClipboardList, X } from "lucide-react";
 import { createCorrection, decideApproval } from "../api/client";
 import type { Approval } from "../api/types";
+import { gateLabel, formatDate } from "../i18n";
 
 interface ApprovalPanelProps {
   approvals: Approval[];
@@ -23,25 +24,25 @@ export function ApprovalPanel({ approvals, busy, onRefresh, setError, setToast, 
   async function decide(decision: "approve" | "reject") {
     if (!pending) return;
     if (decision === "reject" && !comment.trim()) {
-      setError("Reject requires a non-empty comment.");
+      setError("Для запроса правок нужен комментарий.");
       return;
     }
     if (decision === "approve" && DANGEROUS_GATES.has(pending.gate)) {
       const text =
         pending.gate === "commit"
-          ? `You are approving commit for ${taskId}. This may create a git commit in the task worktree.`
-          : `You are approving the ${pending.gate} gate for ${taskId}. Make sure you reviewed artifacts and validation output.`;
+          ? `Вы разрешаете коммит для ${taskId}. Это может создать git commit в task worktree.`
+          : `Вы подтверждаете gate ${pending.gate} для ${taskId}. Проверьте артефакты и результат валидации.`;
       if (!window.confirm(text)) return;
     }
     setLoading(decision);
     try {
       const job = await decideApproval(taskId, pending.gate, { decision, comment: comment.trim() || null });
-      const action = decision === "approve" ? "approved" : "rejected";
-      setToast(`${pending.gate} ${action}; ${job.action} queued`);
+      const action = decision === "approve" ? "подтвержден" : "отклонен";
+      setToast(`${pending.gate} ${action}; ${job.action} в очереди`);
       setComment("");
       await onRefresh();
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Approval action failed");
+      setError(error instanceof Error ? error.message : "Не удалось выполнить approval-действие");
     } finally {
       setLoading(null);
     }
@@ -50,7 +51,7 @@ export function ApprovalPanel({ approvals, busy, onRefresh, setError, setToast, 
   async function requestCorrection(action: "run_without_new_plan" | "show_plan_first") {
     if (!pending) return;
     if (!comment.trim()) {
-      setError("Request changes requires a non-empty comment.");
+      setError("Для запроса правок нужен комментарий.");
       return;
     }
     const loadingKey = action === "run_without_new_plan" ? "run" : "plan";
@@ -64,13 +65,13 @@ export function ApprovalPanel({ approvals, busy, onRefresh, setError, setToast, 
       });
       setToast(
         action === "run_without_new_plan"
-          ? `Correction request created. Mode: ${correction.mode}. Approval already granted by your review comment.`
-          : `Correction request created. Mode: ${correction.mode}. Plan approval requested.`,
+          ? `Запрос правки создан. Режим: ${correction.mode}.`
+          : `Запрос правки создан. Режим: ${correction.mode}. Запрошено approval плана.`,
       );
       setComment("");
       await onRefresh();
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Correction request failed");
+      setError(error instanceof Error ? error.message : "Не удалось создать запрос правки");
     } finally {
       setLoading(null);
     }
@@ -83,47 +84,47 @@ export function ApprovalPanel({ approvals, busy, onRefresh, setError, setToast, 
         <>
           <dl className="kv">
             <dt>gate</dt>
-            <dd>{pending.gate}</dd>
+            <dd>{gateLabel(pending.gate)}</dd>
             <dt>status</dt>
             <dd>{pending.status}</dd>
             <dt>created_at</dt>
-            <dd>{new Date(pending.created_at).toLocaleString()}</dd>
+            <dd>{formatDate(pending.created_at)}</dd>
             <dt>artifact_ids</dt>
-            <dd>{pending.artifact_ids.join(", ") || "none"}</dd>
+            <dd>{pending.artifact_ids.join(", ") || "нет"}</dd>
           </dl>
           <p className="approval-note">
             {isDiffGate
-              ? "A diff review comment is approval to apply that focused correction unless it changes scope or touches risky areas."
-              : "Approving this gate can immediately open the next required gate."}
+              ? "Комментарий к diff может стать основанием для точечной правки, если она не меняет объем задачи и не задевает рискованные области."
+              : "Подтверждение gate может сразу открыть следующий обязательный этап."}
           </p>
           <pre className="json-block">{JSON.stringify(pending.requested_payload, null, 2)}</pre>
-          <textarea value={comment} onChange={(event) => setComment(event.target.value)} placeholder="comment" rows={4} />
+          <textarea value={comment} onChange={(event) => setComment(event.target.value)} placeholder="Комментарий" rows={4} />
           <div className="button-row">
             <button type="button" disabled={busy === "approval" || loading !== null} onClick={() => void decide("approve")}>
               <Check size={16} />
-              {loading === "approve" ? "Approving..." : isDiffGate ? "Approve diff" : "Approve"}
+              {loading === "approve" ? "Подтверждаю..." : isDiffGate ? "Подтвердить diff" : "Подтвердить"}
             </button>
             {isDiffGate ? (
               <>
                 <button type="button" disabled={busy === "approval" || loading !== null} onClick={() => void requestCorrection("run_without_new_plan")}>
                   <Play size={16} />
-                  {loading === "run" ? "Requesting..." : "Request changes & run"}
+                  {loading === "run" ? "Запрашиваю..." : "Правки и запуск"}
                 </button>
                 <button type="button" disabled={busy === "approval" || loading !== null} onClick={() => void requestCorrection("show_plan_first")}>
                   <ClipboardList size={16} />
-                  {loading === "plan" ? "Requesting..." : "Request changes, but show plan first"}
+                  {loading === "plan" ? "Запрашиваю..." : "Правки с новым планом"}
                 </button>
               </>
             ) : (
               <button type="button" disabled={busy === "approval" || loading !== null} onClick={() => void decide("reject")}>
                 <X size={16} />
-                {loading === "reject" ? "Requesting..." : "Request changes"}
+                {loading === "reject" ? "Запрашиваю..." : "Запросить правки"}
               </button>
             )}
           </div>
         </>
       ) : (
-        <div className="empty">No pending approval.</div>
+        <div className="empty">Нет ожидающих approvals.</div>
       )}
     </section>
   );

@@ -308,3 +308,13 @@ export interface RoutingSuggestion {
   created_at: string;
   resolved_at?: string | null;
 }
+
+export type ConfigRecord = Record<string, unknown>;
+
+export interface RouterConfigDocument {
+  projects_path: string;
+  workflows_path: string;
+  tools: ConfigRecord[];
+  projects: ConfigRecord[];
+  workflows: ConfigRecord[];
+}

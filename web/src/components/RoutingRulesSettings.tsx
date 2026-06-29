@@ -29,7 +29,7 @@ export function RoutingRulesSettings({ setError, setToast }: RoutingRulesSetting
   }, []);
 
   useEffect(() => {
-    load().catch((error) => setError(error instanceof Error ? error.message : "Routing settings load failed"));
+    load().catch((error) => setError(error instanceof Error ? error.message : "Не удалось загрузить правила маршрутизации"));
   }, [load, setError]);
 
   const counts = useMemo(() => {
@@ -47,7 +47,7 @@ export function RoutingRulesSettings({ setError, setToast }: RoutingRulesSetting
       setToast(label);
       setError(null);
     } catch (error) {
-      setError(error instanceof Error ? error.message : `${label} failed`);
+      setError(error instanceof Error ? error.message : `${label}: ошибка`);
     } finally {
       setBusy(null);
     }
@@ -58,21 +58,21 @@ export function RoutingRulesSettings({ setError, setToast }: RoutingRulesSetting
       <section className="task-header">
         <div>
           <div className="task-header__title">
-            <h1>Routing rules</h1>
+            <h1>Маршрутизация</h1>
           </div>
           <dl className="task-header__meta">
-            <dt>Active</dt>
+            <dt>Активные</dt>
             <dd>{counts.active || 0}</dd>
-            <dt>Pending</dt>
+            <dt>Ожидают</dt>
             <dd>{counts.pending || 0}</dd>
-            <dt>Rejected</dt>
+            <dt>Отклонены</dt>
             <dd>{counts.rejected || 0}</dd>
-            <dt>Disabled</dt>
+            <dt>Отключены</dt>
             <dd>{counts.disabled || 0}</dd>
           </dl>
         </div>
         <div className="task-header__actions">
-          <button className="icon-button" onClick={() => void runAction("Routing rules refreshed", load)} disabled={busy !== null}>
+          <button className="icon-button" onClick={() => void runAction("Правила обновлены", load)} disabled={busy !== null}>
             <RefreshCw size={16} />
           </button>
         </div>
@@ -81,7 +81,7 @@ export function RoutingRulesSettings({ setError, setToast }: RoutingRulesSetting
       <div className="settings-grid">
         <section className="panel">
           <div className="section-title">
-            <h2>Pending suggestions</h2>
+            <h2>Предложения</h2>
             <StatusBadge status={`${suggestions.filter((item) => item.status === "pending").length} pending`} />
           </div>
           <div className="rule-list">
@@ -99,14 +99,14 @@ export function RoutingRulesSettings({ setError, setToast }: RoutingRulesSetting
                       <button
                         className="icon-button"
                         disabled={busy !== null || suggestion.status !== "pending"}
-                        onClick={() => void runAction("Suggestion promoted", () => promoteRoutingSuggestion(suggestion.id))}
+                        onClick={() => void runAction("Предложение принято", () => promoteRoutingSuggestion(suggestion.id))}
                       >
                         <Check size={16} />
                       </button>
                       <button
                         className="icon-button"
                         disabled={busy !== null || suggestion.status !== "pending"}
-                        onClick={() => void runAction("Suggestion rejected", () => rejectRoutingSuggestion(suggestion.id))}
+                        onClick={() => void runAction("Предложение отклонено", () => rejectRoutingSuggestion(suggestion.id))}
                       >
                         <X size={16} />
                       </button>
@@ -115,25 +115,25 @@ export function RoutingRulesSettings({ setError, setToast }: RoutingRulesSetting
                 </article>
               ))
             ) : (
-              <p className="empty">No suggestions.</p>
+              <p className="empty">Предложений нет.</p>
             )}
           </div>
         </section>
 
         <section className="panel">
           <div className="section-title">
-            <h2>Rules</h2>
+            <h2>Правила</h2>
             <StatusBadge status={`${rules.length} total`} />
           </div>
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>Pattern</th>
-                  <th>Target</th>
-                  <th>Status</th>
-                  <th>Hits</th>
-                  <th>False positives</th>
+                  <th>Паттерн</th>
+                  <th>Цель</th>
+                  <th>Статус</th>
+                  <th>Срабатывания</th>
+                  <th>Ошибки</th>
                   <th></th>
                 </tr>
               </thead>
@@ -147,7 +147,7 @@ export function RoutingRulesSettings({ setError, setToast }: RoutingRulesSetting
                       </td>
                       <td>
                         {rule.target_route_type}
-                        <small>{rule.target_workflow_id || "no workflow"}</small>
+                        <small>{rule.target_workflow_id || "без workflow"}</small>
                       </td>
                       <td>
                         <StatusBadge status={rule.status} />
@@ -159,21 +159,21 @@ export function RoutingRulesSettings({ setError, setToast }: RoutingRulesSetting
                           <button
                             className="icon-button"
                             disabled={busy !== null || rule.status === "active"}
-                            onClick={() => void runAction("Rule promoted", () => promoteRoutingRule(rule.id))}
+                            onClick={() => void runAction("Правило активно", () => promoteRoutingRule(rule.id))}
                           >
                             <Check size={16} />
                           </button>
                           <button
                             className="icon-button"
                             disabled={busy !== null || rule.status === "rejected"}
-                            onClick={() => void runAction("Rule rejected", () => rejectRoutingRule(rule.id))}
+                            onClick={() => void runAction("Правило отклонено", () => rejectRoutingRule(rule.id))}
                           >
                             <X size={16} />
                           </button>
                           <button
                             className="icon-button"
                             disabled={busy !== null || rule.status === "disabled"}
-                            onClick={() => void runAction("Rule disabled", () => disableRoutingRule(rule.id))}
+                            onClick={() => void runAction("Правило отключено", () => disableRoutingRule(rule.id))}
                           >
                             <CircleSlash size={16} />
                           </button>
@@ -183,7 +183,7 @@ export function RoutingRulesSettings({ setError, setToast }: RoutingRulesSetting
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={6}>No routing rules.</td>
+                    <td colSpan={6}>Правил пока нет.</td>
                   </tr>
                 )}
               </tbody>

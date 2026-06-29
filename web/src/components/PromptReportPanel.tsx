@@ -16,7 +16,7 @@ export function PromptReportPanel({ setError, taskId }: PromptReportPanelProps) 
         const response = await listPromptBuilds(taskId);
         setItems(response.items.slice().reverse());
       } catch (error) {
-        setError(error instanceof Error ? error.message : "Prompt report load failed");
+        setError(error instanceof Error ? error.message : "Не удалось загрузить отчет токенов");
       }
     }
     void load();
@@ -26,26 +26,26 @@ export function PromptReportPanel({ setError, taskId }: PromptReportPanelProps) 
 
   return (
     <section className="panel">
-      <h2>Token report</h2>
+      <h2>Токены</h2>
       {latest ? (
         <>
           <dl className="kv">
-            <dt>Operation</dt>
+            <dt>Операция</dt>
             <dd>{latest.operation}</dd>
-            <dt>Status</dt>
+            <dt>Статус</dt>
             <dd>{latest.status}</dd>
-            <dt>Prompt chars</dt>
+            <dt>Символы prompt</dt>
             <dd>{latest.total_chars.toLocaleString()}</dd>
-            <dt>Budget chars</dt>
+            <dt>Бюджет</dt>
             <dd>{latest.budget_chars.toLocaleString()}</dd>
-            <dt>Included</dt>
+            <dt>Включено</dt>
             <dd>{latest.included.length}</dd>
-            <dt>Excluded</dt>
+            <dt>Исключено</dt>
             <dd>{latest.excluded.length}</dd>
           </dl>
         </>
       ) : (
-        <div className="empty">No prompt builds recorded.</div>
+        <div className="empty">Отчетов prompt пока нет.</div>
       )}
     </section>
   );

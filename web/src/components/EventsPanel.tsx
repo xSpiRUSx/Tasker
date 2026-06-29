@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { listEvents } from "../api/client";
 import type { TaskEvent } from "../api/types";
+import { formatDate } from "../i18n";
 
 interface EventsPanelProps {
   setError: (message: string | null) => void;
@@ -18,7 +19,7 @@ export function EventsPanel({ setError, taskId }: EventsPanelProps) {
         setEvents(response.items);
         setError(null);
       } catch (error) {
-        setError(error instanceof Error ? error.message : "Loading events failed");
+        setError(error instanceof Error ? error.message : "Не удалось загрузить события");
       }
     }
     void load();
@@ -29,16 +30,16 @@ export function EventsPanel({ setError, taskId }: EventsPanelProps) {
   return (
     <section className="panel">
       <div className="section-title">
-        <h2>Events</h2>
+        <h2>События</h2>
         <label className="toggle">
           <input checked={chronological} onChange={(event) => setChronological(event.target.checked)} type="checkbox" />
-          chronological
+          хронологически
         </label>
       </div>
       <div className="timeline">
         {visibleEvents.map((event) => (
           <article className="timeline-item" key={event.id}>
-            <time>{new Date(event.created_at).toLocaleString()}</time>
+            <time>{formatDate(event.created_at)}</time>
             <strong>{event.event_type}</strong>
             <pre className="json-block">{JSON.stringify(event.payload, null, 2)}</pre>
           </article>

@@ -1,10 +1,12 @@
+import { statusLabel } from "../i18n";
+
 interface StatusBadgeProps {
   status?: string | null;
 }
 
 export function StatusBadge({ status }: StatusBadgeProps) {
   const value = status || "unknown";
-  return <span className={`status-badge ${classNameForStatus(value)}`}>{value}</span>;
+  return <span className={`status-badge ${classNameForStatus(value)}`}>{statusLabel(value)}</span>;
 }
 
 function classNameForStatus(status: string): string {

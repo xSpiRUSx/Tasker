@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -50,6 +52,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health/tools")
     def tool_health():
         return orchestrator.tool_health()
+
+    @app.get("/config/router")
+    def get_router_config():
+        return orchestrator.router_config()
+
+    @app.put("/config/router")
+    def update_router_config(payload: dict[str, Any]):
+        try:
+            return orchestrator.save_router_config(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/route")
     def route_task(request: RouteRequest):

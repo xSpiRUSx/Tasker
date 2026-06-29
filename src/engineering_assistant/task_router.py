@@ -17,6 +17,10 @@ class TaskRouter:
         self.config: RouterConfig = load_router_config(self.projects_path, self.workflows_path)
         self._graph = build_graph(self.config, provider=provider)
 
+    def reload(self) -> None:
+        self.config = load_router_config(self.projects_path, self.workflows_path)
+        self._graph = build_graph(self.config, provider=self.provider)
+
     def route(self, message: str) -> RouteDecision:
         state = self._graph.invoke({"input_text": message})
         return state["result"]

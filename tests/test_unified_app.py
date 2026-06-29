@@ -1,4 +1,6 @@
 from pathlib import Path
+from dataclasses import replace
+import shutil
 import time
 
 from fastapi.testclient import TestClient
@@ -182,6 +184,54 @@ def test_unified_task_cancel_and_cors(tmp_path):
     cors_response = client.get("/health", headers={"Origin": "http://127.0.0.1:5173"})
     assert cors_response.status_code == 200
     assert cors_response.headers["access-control-allow-origin"] == "http://127.0.0.1:5173"
+
+
+def test_unified_router_config_can_be_edited(tmp_path):
+    projects_path = tmp_path / "projects.yml"
+    workflows_path = tmp_path / "workflows.yml"
+    shutil.copy2(ROOT / "config" / "projects.yml", projects_path)
+    shutil.copy2(ROOT / "config" / "workflows.yml", workflows_path)
+    settings = replace(make_settings(tmp_path), projects_path=projects_path, workflows_path=workflows_path)
+    client = TestClient(create_app(settings))
+
+    response = client.get("/config/router")
+    assert response.status_code == 200
+    config = response.json()
+    config["projects"].append(
+        {
+            "id": "ui_demo",
+            "name": "UI Demo",
+            "path": ".",
+            "aliases": ["ui-demo"],
+            "description": "Project added through the web config API.",
+            "tools": ["codex"],
+        }
+    )
+    config["workflows"].append(
+        {
+            "id": "ui_demo_question",
+            "name": "UI demo question",
+            "description": "Temporary workflow created by config endpoint test.",
+            "project_ids": ["ui_demo"],
+            "intents": ["question"],
+            "task_kinds": ["question"],
+            "complexity": ["trivial", "simple"],
+            "required_tools": ["codex"],
+            "approval_gates": [],
+            "steps": ["Answer the question."],
+        }
+    )
+
+    update_response = client.put("/config/router", json=config)
+
+    assert update_response.status_code == 200
+    updated = update_response.json()
+    assert any(project["id"] == "ui_demo" for project in updated["projects"])
+    assert any(workflow["id"] == "ui_demo_question" for workflow in updated["workflows"])
+
+    route_response = client.post("/route", json={"message": "ui-demo: what is this project?"})
+    assert route_response.status_code == 200
+    assert route_response.json()["project_id"] == "ui_demo"
 
 
 def test_unified_ui_tasks_smoke(tmp_path):

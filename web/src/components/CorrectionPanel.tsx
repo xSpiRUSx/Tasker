@@ -22,7 +22,7 @@ export function CorrectionPanel({ busy, onCorrection, task }: CorrectionPanelPro
 
   return (
     <section className="panel">
-      <h2>Status action</h2>
+      <h2>Сообщение</h2>
       <p className="approval-note">{label}</p>
       <textarea
         value={message}
@@ -37,35 +37,35 @@ export function CorrectionPanel({ busy, onCorrection, task }: CorrectionPanelPro
       />
       <button type="button" disabled={!message.trim() || busy === "correction"} onClick={() => void submit()}>
         <Send size={16} />
-        {busy === "correction" ? "Queueing..." : buttonLabel(status)}
+        {busy === "correction" ? "Ставлю в очередь..." : buttonLabel(status)}
       </button>
     </section>
   );
 }
 
 function actionLabel(status: string) {
-  if (status === "changes_requested") return "Create a correction plan from the requested changes.";
-  if (status === "executing_correction" || status === "validating_correction") return "Applying requested changes.";
-  if (status === "awaiting_correction_diff_approval") return "Review the updated diff after the requested correction.";
-  if (status === "correction_blocked") return "Correction blocked; send a narrower request or ask to create a linked task.";
-  if (status === "validation_failed") return "Send validation notes and generate a focused repair plan.";
-  if (status === "prompt_too_large") return "Ask Tasker to compact context before retrying execution.";
-  if (status === "plan_rejected") return "Revise the rejected plan with a concrete correction request.";
-  return "Send a task message or correction request.";
+  if (status === "changes_requested") return "Создать план правки из комментария.";
+  if (status === "executing_correction" || status === "validating_correction") return "Запрошенные правки применяются.";
+  if (status === "awaiting_correction_diff_approval") return "Проверьте обновленный diff после правки.";
+  if (status === "correction_blocked") return "Правка заблокирована; сузьте запрос или создайте связанную задачу.";
+  if (status === "validation_failed") return "Отправьте замечания валидации и создайте план исправления.";
+  if (status === "prompt_too_large") return "Попросите Tasker сжать контекст перед повторным запуском.";
+  if (status === "plan_rejected") return "Уточните отклоненный план конкретным запросом.";
+  return "Отправить сообщение или запрос правки.";
 }
 
 function placeholderFor(status: string) {
-  if (status === "prompt_too_large") return "Compact context and retry execution with only the latest approved artifacts.";
-  if (status === "changes_requested") return "Create correction plan from my comments: ...";
-  if (status === "correction_blocked") return "Narrow correction to the reviewed diff: ...";
-  if (status === "validation_failed") return "Repair validation failure: ...";
-  return "Message to task / correction request";
+  if (status === "prompt_too_large") return "Сжать контекст и повторить выполнение только с актуальными артефактами.";
+  if (status === "changes_requested") return "Создать план правки по моим комментариям: ...";
+  if (status === "correction_blocked") return "Сузить правку до проверенного diff: ...";
+  if (status === "validation_failed") return "Исправить ошибку валидации: ...";
+  return "Сообщение к задаче / запрос правки";
 }
 
 function buttonLabel(status: string) {
-  if (status === "changes_requested") return "Create correction plan";
-  if (status === "correction_blocked") return "Send correction";
-  if (status === "validation_failed") return "Retry with repair plan";
-  if (status === "prompt_too_large") return "Compact context";
-  return "Send message";
+  if (status === "changes_requested") return "Создать план правки";
+  if (status === "correction_blocked") return "Отправить правку";
+  if (status === "validation_failed") return "Повторить с планом";
+  if (status === "prompt_too_large") return "Сжать контекст";
+  return "Отправить";
 }

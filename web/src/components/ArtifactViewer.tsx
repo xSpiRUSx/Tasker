@@ -11,7 +11,7 @@ export function ArtifactViewer({ content, onRefresh }: ArtifactViewerProps) {
   if (!content) {
     return (
       <section className="artifact-viewer panel">
-        <div className="empty">Select an artifact.</div>
+        <div className="empty">Выберите артефакт.</div>
       </section>
     );
   }
@@ -29,15 +29,15 @@ export function ArtifactViewer({ content, onRefresh }: ArtifactViewerProps) {
         <div className="button-row">
           <button type="button" onClick={() => void navigator.clipboard.writeText(content.content)}>
             <Copy size={16} />
-            Copy content
+            Скопировать
           </button>
           <button type="button" onClick={() => void navigator.clipboard.writeText(content.artifact.relative_path)}>
             <Copy size={16} />
-            Copy path
+            Путь
           </button>
           <button type="button" onClick={onRefresh}>
             <RefreshCw size={16} />
-            Refresh
+            Обновить
           </button>
         </div>
       </div>

@@ -1,4 +1,5 @@
 import type { Approval } from "../api/types";
+import { formatDate } from "../i18n";
 
 export function ApprovalsPanel({ approvals }: { approvals: Approval[] }) {
   return (
@@ -10,10 +11,10 @@ export function ApprovalsPanel({ approvals }: { approvals: Approval[] }) {
             <tr>
               <th>gate</th>
               <th>status</th>
-              <th>created_at</th>
-              <th>resolved_at</th>
-              <th>user_comment</th>
-              <th>artifact_ids</th>
+              <th>создано</th>
+              <th>решено</th>
+              <th>комментарий</th>
+              <th>артефакты</th>
             </tr>
           </thead>
           <tbody>
@@ -32,8 +33,4 @@ export function ApprovalsPanel({ approvals }: { approvals: Approval[] }) {
       </div>
     </section>
   );
-}
-
-function formatDate(value?: string | null) {
-  return value ? new Date(value).toLocaleString() : "";
 }

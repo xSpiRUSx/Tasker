@@ -1,16 +1,17 @@
 import type { Dispatch, SetStateAction } from "react";
 import type { ListTasksParams, Task } from "../api/types";
+import { formatDate } from "../i18n";
 import { StatusBadge } from "./StatusBadge";
 
 const STATUS_GROUPS: { label: string; value: string }[] = [
-  { label: "All", value: "" },
-  { label: "Pending approvals", value: "pending_approvals" },
-  { label: "Awaiting approval", value: "group:awaiting" },
-  { label: "In progress", value: "group:progress" },
-  { label: "Changes requested", value: "group:changes" },
-  { label: "Failed", value: "group:failed" },
-  { label: "Closed", value: "closed" },
-  { label: "Cancelled", value: "cancelled" },
+  { label: "Все", value: "" },
+  { label: "Ожидают решения", value: "pending_approvals" },
+  { label: "Ожидают approval", value: "group:awaiting" },
+  { label: "В работе", value: "group:progress" },
+  { label: "Нужны правки", value: "group:changes" },
+  { label: "Ошибки", value: "group:failed" },
+  { label: "Закрытые", value: "closed" },
+  { label: "Отмененные", value: "cancelled" },
 ];
 
 interface TaskListProps {
@@ -26,7 +27,7 @@ export function TaskList({ filters, onSelectTask, onSetFilters, selectedTaskId, 
   return (
     <section className="panel task-list-panel">
       <div className="section-title">
-        <h2>Tasks</h2>
+        <h2>Задачи</h2>
         <span>{total}</span>
       </div>
       <div className="filters">
@@ -53,11 +54,11 @@ export function TaskList({ filters, onSelectTask, onSetFilters, selectedTaskId, 
         <input
           value={filters.q || ""}
           onChange={(event) => onSetFilters((current) => ({ ...current, q: event.target.value || undefined }))}
-          placeholder="search"
+          placeholder="Поиск"
         />
       </div>
       <div className="task-list">
-        {tasks.length === 0 ? <div className="empty">No tasks found.</div> : null}
+        {tasks.length === 0 ? <div className="empty">Задачи не найдены.</div> : null}
         {tasks.map((task) => (
           <button
             className={task.id === selectedTaskId ? "task-list-item task-list-item--selected" : "task-list-item"}
@@ -71,8 +72,8 @@ export function TaskList({ filters, onSelectTask, onSetFilters, selectedTaskId, 
             </div>
             <p>{task.user_message}</p>
             <div className="task-list-item__meta">
-              <span>{task.project_id || "unknown project"}</span>
-              <span>{task.workflow_id || "unknown workflow"}</span>
+              <span>{task.project_id || "проект не выбран"}</span>
+              <span>{task.workflow_id || "workflow не выбран"}</span>
             </div>
             <div className="task-list-item__meta">
               <span>{formatDate(task.updated_at)}</span>
@@ -83,8 +84,4 @@ export function TaskList({ filters, onSelectTask, onSetFilters, selectedTaskId, 
       </div>
     </section>
   );
-}
-
-function formatDate(value?: string | null) {
-  return value ? new Date(value).toLocaleString() : "unknown";
 }

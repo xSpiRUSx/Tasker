@@ -39,6 +39,7 @@ from engineering_orchestrator.services.job_runner import JobRunner
 from engineering_orchestrator.services.planning_service import PlanningService
 from engineering_orchestrator.services.project_registry import ProjectRegistry
 from engineering_orchestrator.services.review_service import ReviewService
+from engineering_orchestrator.services.router_config_store import RouterConfigStore
 from engineering_orchestrator.services.task_store import TaskStore, utc_now
 from engineering_orchestrator.services.tool_health import ToolHealthService
 from engineering_orchestrator.services.validation_service import ValidationService
@@ -318,6 +319,24 @@ class Orchestrator:
             payload.get("user_correction"),
             payload.get("accepted"),
         )
+
+    def router_config(self) -> dict[str, Any]:
+        return RouterConfigStore(self.settings.projects_path, self.settings.workflows_path).read()
+
+    def save_router_config(self, payload: dict[str, Any]) -> dict[str, Any]:
+        saved = RouterConfigStore(self.settings.projects_path, self.settings.workflows_path).save(payload)
+        self.reload_router_config()
+        return saved
+
+    def reload_router_config(self) -> None:
+        self.projects = ProjectRegistry(self.settings.projects_path)
+        self.workflows = WorkflowRegistry(self.settings.workflows_path)
+        self.model_selector.projects = self.projects
+        self.tool_health_service.projects = self.projects
+        self.context_builder.projects = self.projects
+        self.context_builder.workflows = self.workflows
+        if self.task_router is not None and hasattr(self.task_router, "reload"):
+            self.task_router.reload()
 
     def tool_health(self) -> dict[str, Any]:
         return self.tool_health_service.global_report()
@@ -3008,6 +3027,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health/tools")
     def tool_health():
         return orchestrator.tool_health()
+
+    @app.get("/config/router")
+    def get_router_config():
+        return orchestrator.router_config()
+
+    @app.put("/config/router")
+    def update_router_config(payload: dict[str, Any]):
+        try:
+            return orchestrator.save_router_config(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/route/adaptive")
     def route_adaptive(request: AdaptiveRouteRequest):

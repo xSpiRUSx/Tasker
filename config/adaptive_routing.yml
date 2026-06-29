@@ -1,0 +1,46 @@
+adaptive_routing:
+  enabled: true
+  deterministic_first: true
+
+  confidence_thresholds:
+    accept_deterministic: 0.85
+    call_cheap_classifier_below: 0.75
+    ask_clarification_below: 0.60
+
+  cheap_classifier:
+    enabled: true
+    operation: adaptive_route_fallback
+    model_target: cheap_classifier
+    max_prompt_chars: 12000
+    include_recent_tasks: true
+    recent_tasks_limit: 20
+    include_project_aliases: true
+    include_active_rules: true
+    include_code: false
+    include_artifacts: false
+    include_diffs: false
+    include_runtime_logs: false
+
+  learning:
+    enabled: true
+    auto_promote: false
+    require_human_approval: true
+    create_eval_cases: true
+    min_confidence_for_suggestion: 0.80
+    min_confidence_for_auto_promote: 0.92
+
+  safety:
+    never_auto_promote_for:
+      - config_change
+      - security_change
+      - role_change
+      - deployment_change
+      - migration
+      - high_risk_workflow
+    disable_after_false_positives: 2
+
+  normalization:
+    lowercase: true
+    replace_yo: true
+    collapse_spaces: true
+    strip_punctuation: false

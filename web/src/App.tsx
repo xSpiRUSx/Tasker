@@ -11,6 +11,7 @@ import {
 } from "./api/client";
 import type { Approval, ListTasksParams, RouteDecision, Task } from "./api/types";
 import { AppShell } from "./components/AppShell";
+import { RoutingRulesSettings } from "./components/RoutingRulesSettings";
 import { Sidebar } from "./components/Sidebar";
 import { TaskDetail } from "./components/TaskDetail";
 
@@ -60,6 +61,7 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>(null);
 
   const localStatusFilter = useMemo(() => filters.status || "", [filters.status]);
+  const isRoutingSettings = window.location.pathname === "/settings/routing-rules";
 
   const loadHealth = useCallback(async () => {
     try {
@@ -186,28 +188,34 @@ export default function App() {
 
   return (
     <AppShell apiHealthy={apiHealthy} error={error} toast={toast} onDismissError={() => setError(null)}>
-      <Sidebar
-        busy={busy}
-        filters={filters}
-        onCreate={handleCreate}
-        onPreview={handlePreview}
-        onSelectTask={setSelectedTaskId}
-        onSetFilters={setFilters}
-        routePreview={routePreview}
-        selectedTaskId={selectedTaskId}
-        tasks={tasks}
-        total={total}
-      />
-      <TaskDetail
-        approvals={approvals}
-        busy={busy}
-        onCancel={handleCancel}
-        onCorrection={handleCorrection}
-        onRefresh={refresh}
-        selectedTask={selectedTask}
-        setError={setError}
-        setToast={setToast}
-      />
+      {isRoutingSettings ? (
+        <RoutingRulesSettings setError={setError} setToast={setToast} />
+      ) : (
+        <>
+          <Sidebar
+            busy={busy}
+            filters={filters}
+            onCreate={handleCreate}
+            onPreview={handlePreview}
+            onSelectTask={setSelectedTaskId}
+            onSetFilters={setFilters}
+            routePreview={routePreview}
+            selectedTaskId={selectedTaskId}
+            tasks={tasks}
+            total={total}
+          />
+          <TaskDetail
+            approvals={approvals}
+            busy={busy}
+            onCancel={handleCancel}
+            onCorrection={handleCorrection}
+            onRefresh={refresh}
+            selectedTask={selectedTask}
+            setError={setError}
+            setToast={setToast}
+          />
+        </>
+      )}
     </AppShell>
   );
 }

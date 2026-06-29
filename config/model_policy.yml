@@ -61,6 +61,12 @@ model_targets:
     reasoning_effort: medium
     purpose: "Cheapest focused coding iterations and micro-corrections"
 
+  cheap_classifier:
+    runtime: responses_api
+    model: ${TASKER_CHEAP_CLASSIFIER_MODEL}
+    reasoning_effort: minimal
+    purpose: "Cheap semantic routing fallback and rule suggestion"
+
   codex_gpt55_medium:
     runtime: codex_cli
     model: ${TASKER_GPT55_MODEL}
@@ -107,6 +113,12 @@ operation_routes:
   detect_linked_task:
     first: deterministic
     fallback: gpt55_medium
+
+  adaptive_route_fallback:
+    first: cheap_classifier
+
+  routing_rule_suggestion:
+    first: cheap_classifier
 
   create_simple_plan:
     first: gpt55_medium

@@ -272,3 +272,39 @@ export interface AgentStep {
   finished_at?: string | null;
   error?: string | null;
 }
+
+export interface RoutingRule {
+  id: string;
+  rule_type: string;
+  pattern_type: "exact" | "contains" | "regex" | "semantic_hint" | string;
+  pattern: string;
+  language?: string | null;
+  target_route_type: string;
+  target_workflow_id?: string | null;
+  target_task_kind?: string | null;
+  target_project_id?: string | null;
+  constraints: string[];
+  positive_examples: string[];
+  negative_examples: string[];
+  confidence?: number | null;
+  priority: number;
+  status: "pending" | "active" | "rejected" | "disabled" | string;
+  source: string;
+  source_task_id?: string | null;
+  source_message?: string | null;
+  hit_count: number;
+  false_positive_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RoutingSuggestion {
+  id: string;
+  task_id?: string | null;
+  message: string;
+  classifier_result: Record<string, unknown>;
+  suggested_rules: Array<Record<string, unknown>>;
+  status: "pending" | "promoted" | "rejected" | string;
+  created_at: string;
+  resolved_at?: string | null;
+}

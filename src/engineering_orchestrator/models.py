@@ -49,6 +49,8 @@ ArtifactKind = Literal[
     "task_index",
     "request",
     "route_decision",
+    "routing_diagnostics",
+    "routing_diagnostics_json",
     "context_summary",
     "working_memory",
     "working_memory_json",

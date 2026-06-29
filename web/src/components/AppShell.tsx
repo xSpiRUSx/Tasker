@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Activity, AlertCircle, CheckCircle2 } from "lucide-react";
+import { Activity, AlertCircle, CheckCircle2, Settings } from "lucide-react";
 import { ErrorBanner } from "./ErrorBanner";
 
 interface AppShellProps {
@@ -14,7 +14,15 @@ export function AppShell({ apiHealthy, children, error, toast, onDismissError }:
   return (
     <div className="app">
       <header className="topbar">
-        <div className="brand">TAsker</div>
+        <div className="topbar__left">
+          <a className="brand" href="/">
+            TAsker
+          </a>
+          <a className="topbar__link" href="/settings/routing-rules">
+            <Settings size={16} />
+            Routing
+          </a>
+        </div>
         <div className={apiHealthy ? "api-state api-state--ok" : "api-state api-state--bad"}>
           {apiHealthy ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
           API: {apiHealthy ? "healthy" : "unavailable"}

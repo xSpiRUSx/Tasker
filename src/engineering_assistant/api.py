@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from engineering_assistant.settings import load_settings
 from engineering_assistant.task_router import TaskRouter
-from engineering_orchestrator.api import Orchestrator
+from engineering_orchestrator.api import AdaptiveRouteRequest, Orchestrator
 from engineering_orchestrator.models import (
     ApprovalDecisionRequest,
     CancelTaskRequest,
@@ -54,6 +54,87 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/route")
     def route_task(request: RouteRequest):
         return router.route(request.message)
+
+    @app.post("/route/adaptive")
+    def route_adaptive(request: AdaptiveRouteRequest):
+        context = {**request.context, "debug": request.debug or bool(request.context.get("debug"))}
+        decision = orchestrator.route_adaptive(request.message, context)
+        payload = decision.model_dump(mode="json")
+        if not context.get("debug"):
+            payload.pop("diagnostics", None)
+        return payload
+
+    @app.get("/routing/rules")
+    def list_routing_rules(status: str | None = None):
+        return {"items": orchestrator.list_routing_rules(status)}
+
+    @app.post("/routing/rules")
+    def create_routing_rule(payload: dict):
+        return orchestrator.create_routing_rule(payload)
+
+    @app.get("/routing/rules/{rule_id}")
+    def get_routing_rule(rule_id: str):
+        try:
+            return orchestrator.get_routing_rule(rule_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.patch("/routing/rules/{rule_id}")
+    def update_routing_rule(rule_id: str, payload: dict):
+        try:
+            return orchestrator.update_routing_rule(rule_id, payload)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/routing/rules/{rule_id}/promote")
+    def promote_routing_rule(rule_id: str):
+        try:
+            return orchestrator.promote_routing_rule(rule_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/routing/rules/{rule_id}/reject")
+    def reject_routing_rule(rule_id: str):
+        try:
+            return orchestrator.reject_routing_rule(rule_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/routing/rules/{rule_id}/disable")
+    def disable_routing_rule(rule_id: str):
+        try:
+            return orchestrator.disable_routing_rule(rule_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/routing/suggestions")
+    def list_routing_suggestions(status: str | None = None):
+        return {"items": orchestrator.list_routing_suggestions(status)}
+
+    @app.get("/routing/suggestions/{suggestion_id}")
+    def get_routing_suggestion(suggestion_id: str):
+        try:
+            return orchestrator.get_routing_suggestion(suggestion_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/routing/suggestions/{suggestion_id}/promote")
+    def promote_routing_suggestion(suggestion_id: str):
+        try:
+            return orchestrator.promote_routing_suggestion(suggestion_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/routing/suggestions/{suggestion_id}/reject")
+    def reject_routing_suggestion(suggestion_id: str):
+        try:
+            return orchestrator.reject_routing_suggestion(suggestion_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/routing/feedback")
+    def routing_feedback(payload: dict):
+        return orchestrator.add_routing_feedback(payload)
 
     @app.post("/tasks")
     def create_task(request: CreateTaskRequest):

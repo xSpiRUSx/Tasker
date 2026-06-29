@@ -89,8 +89,25 @@ textarea {
 }
 
 .brand {
+  color: white;
   font-size: 20px;
   font-weight: 700;
+  text-decoration: none;
+}
+
+.topbar__left {
+  align-items: center;
+  display: flex;
+  gap: 18px;
+}
+
+.topbar__link {
+  align-items: center;
+  color: #d7e7f0;
+  display: inline-flex;
+  font-size: 14px;
+  gap: 7px;
+  text-decoration: none;
 }
 
 .api-state,
@@ -134,6 +151,47 @@ textarea {
   display: grid;
   grid-template-columns: 360px minmax(0, 1fr);
   min-height: calc(100vh - 56px);
+}
+
+.settings-main {
+  grid-column: 1 / -1;
+}
+
+.settings-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  margin-top: 12px;
+}
+
+.rule-list {
+  display: grid;
+  gap: 8px;
+}
+
+.rule-row {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 10px;
+}
+
+.rule-row__main,
+.rule-row__meta {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.rule-row__main span,
+.rule-row__main small,
+td small {
+  color: var(--muted);
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
 }
 
 .sidebar {
@@ -607,6 +665,7 @@ th {
 @media (max-width: 940px) {
   .layout,
   .detail-grid,
+  .settings-grid,
   .artifact-tab {
     grid-template-columns: 1fr;
   }

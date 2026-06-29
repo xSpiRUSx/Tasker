@@ -250,6 +250,63 @@ class TaskStore:
                   FOREIGN KEY(run_id) REFERENCES agent_runs(id),
                   FOREIGN KEY(task_id) REFERENCES tasks(id)
                 );
+
+                CREATE TABLE IF NOT EXISTS routing_rules (
+                  id TEXT PRIMARY KEY,
+                  rule_type TEXT NOT NULL,
+                  pattern_type TEXT NOT NULL,
+                  pattern TEXT NOT NULL,
+                  language TEXT,
+                  target_route_type TEXT NOT NULL,
+                  target_workflow_id TEXT,
+                  target_task_kind TEXT,
+                  target_project_id TEXT,
+                  constraints_json TEXT,
+                  positive_examples_json TEXT,
+                  negative_examples_json TEXT,
+                  confidence REAL,
+                  priority INTEGER DEFAULT 100,
+                  status TEXT NOT NULL,
+                  source TEXT NOT NULL,
+                  source_task_id TEXT,
+                  source_message TEXT,
+                  hit_count INTEGER DEFAULT 0,
+                  false_positive_count INTEGER DEFAULT 0,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS routing_rule_suggestions (
+                  id TEXT PRIMARY KEY,
+                  task_id TEXT,
+                  message TEXT NOT NULL,
+                  classifier_result_json TEXT NOT NULL,
+                  suggested_rules_json TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  resolved_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS routing_feedback (
+                  id TEXT PRIMARY KEY,
+                  task_id TEXT,
+                  original_route_json TEXT,
+                  final_route_json TEXT,
+                  user_correction TEXT,
+                  accepted INTEGER,
+                  created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS routing_diagnostics (
+                  id TEXT PRIMARY KEY,
+                  task_id TEXT,
+                  message TEXT NOT NULL,
+                  deterministic_result_json TEXT,
+                  classifier_result_json TEXT,
+                  final_result_json TEXT NOT NULL,
+                  used_classifier INTEGER NOT NULL,
+                  created_at TEXT NOT NULL
+                );
                 """
             )
             self._ensure_column(conn, "agent_runs", "correction_request_id", "TEXT")
@@ -653,6 +710,288 @@ class TaskStore:
                 (task_id,),
             ).fetchall()
         return [self._row_to_correction_request(row) for row in rows]
+
+    def create_routing_rule(self, rule: dict[str, Any]) -> dict[str, Any]:
+        now = utc_now()
+        record = {
+            "id": rule.get("id") or new_id("rule"),
+            "rule_type": rule.get("rule_type") or "intent_pattern",
+            "pattern_type": rule.get("pattern_type") or "contains",
+            "pattern": rule.get("pattern") or "",
+            "language": rule.get("language"),
+            "target_route_type": rule.get("target_route_type") or "unknown",
+            "target_workflow_id": rule.get("target_workflow_id"),
+            "target_task_kind": rule.get("target_task_kind"),
+            "target_project_id": rule.get("target_project_id"),
+            "constraints": list(rule.get("constraints") or []),
+            "positive_examples": list(rule.get("positive_examples") or []),
+            "negative_examples": list(rule.get("negative_examples") or []),
+            "confidence": rule.get("confidence"),
+            "priority": int(rule.get("priority") or 100),
+            "status": rule.get("status") or "pending",
+            "source": rule.get("source") or "human",
+            "source_task_id": rule.get("source_task_id"),
+            "source_message": rule.get("source_message"),
+            "hit_count": int(rule.get("hit_count") or 0),
+            "false_positive_count": int(rule.get("false_positive_count") or 0),
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO routing_rules (
+                  id, rule_type, pattern_type, pattern, language, target_route_type,
+                  target_workflow_id, target_task_kind, target_project_id, constraints_json,
+                  positive_examples_json, negative_examples_json, confidence, priority,
+                  status, source, source_task_id, source_message, hit_count,
+                  false_positive_count, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record["id"],
+                    record["rule_type"],
+                    record["pattern_type"],
+                    record["pattern"],
+                    record["language"],
+                    record["target_route_type"],
+                    record["target_workflow_id"],
+                    record["target_task_kind"],
+                    record["target_project_id"],
+                    _json(record["constraints"]),
+                    _json(record["positive_examples"]),
+                    _json(record["negative_examples"]),
+                    record["confidence"],
+                    record["priority"],
+                    record["status"],
+                    record["source"],
+                    record["source_task_id"],
+                    record["source_message"],
+                    record["hit_count"],
+                    record["false_positive_count"],
+                    now.isoformat(),
+                    now.isoformat(),
+                ),
+            )
+        return self.get_routing_rule(str(record["id"]))
+
+    def get_routing_rule(self, rule_id: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM routing_rules WHERE id = ?", (rule_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"Routing rule not found: {rule_id}")
+        return self._row_to_routing_rule(row)
+
+    def list_routing_rules(self, status: str | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM routing_rules"
+        params: list[Any] = []
+        if status:
+            sql += " WHERE status = ?"
+            params.append(status)
+        sql += " ORDER BY priority, created_at, id"
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [self._row_to_routing_rule(row) for row in rows]
+
+    def update_routing_rule(self, rule_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        current = self.get_routing_rule(rule_id)
+        updated = {**current, **patch, "updated_at": utc_now()}
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE routing_rules SET
+                  rule_type = ?, pattern_type = ?, pattern = ?, language = ?,
+                  target_route_type = ?, target_workflow_id = ?, target_task_kind = ?,
+                  target_project_id = ?, constraints_json = ?, positive_examples_json = ?,
+                  negative_examples_json = ?, confidence = ?, priority = ?, status = ?,
+                  source = ?, source_task_id = ?, source_message = ?, hit_count = ?,
+                  false_positive_count = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    updated["rule_type"],
+                    updated["pattern_type"],
+                    updated["pattern"],
+                    updated.get("language"),
+                    updated["target_route_type"],
+                    updated.get("target_workflow_id"),
+                    updated.get("target_task_kind"),
+                    updated.get("target_project_id"),
+                    _json(updated.get("constraints") or []),
+                    _json(updated.get("positive_examples") or []),
+                    _json(updated.get("negative_examples") or []),
+                    updated.get("confidence"),
+                    int(updated.get("priority") or 100),
+                    updated.get("status") or "pending",
+                    updated.get("source") or "human",
+                    updated.get("source_task_id"),
+                    updated.get("source_message"),
+                    int(updated.get("hit_count") or 0),
+                    int(updated.get("false_positive_count") or 0),
+                    updated["updated_at"].isoformat(),
+                    rule_id,
+                ),
+            )
+        return self.get_routing_rule(rule_id)
+
+    def set_routing_rule_status(self, rule_id: str, status: str) -> dict[str, Any]:
+        return self.update_routing_rule(rule_id, {"status": status})
+
+    def increment_routing_rule_hit(self, rule_id: str) -> dict[str, Any]:
+        rule = self.get_routing_rule(rule_id)
+        return self.update_routing_rule(rule_id, {"hit_count": int(rule.get("hit_count") or 0) + 1})
+
+    def add_routing_false_positive(self, rule_id: str, disable_after: int) -> dict[str, Any]:
+        rule = self.get_routing_rule(rule_id)
+        count = int(rule.get("false_positive_count") or 0) + 1
+        patch: dict[str, Any] = {"false_positive_count": count}
+        if count >= disable_after:
+            patch["status"] = "disabled"
+        return self.update_routing_rule(rule_id, patch)
+
+    def create_routing_rule_suggestion(
+        self,
+        task_id: str | None,
+        message: str,
+        classifier_result: dict[str, Any],
+        suggested_rules: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        now = utc_now()
+        suggestion_id = new_id("rule-suggestion")
+        rule_ids: list[str] = []
+        for suggestion in suggested_rules:
+            rule = self.create_routing_rule(
+                {
+                    **suggestion,
+                    "status": "pending",
+                    "source": "llm_suggested",
+                    "source_task_id": task_id,
+                    "source_message": message,
+                }
+            )
+            rule_ids.append(str(rule["id"]))
+        payload = [{"rule_id": rule_id, **suggestion} for rule_id, suggestion in zip(rule_ids, suggested_rules)]
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO routing_rule_suggestions (
+                  id, task_id, message, classifier_result_json, suggested_rules_json,
+                  status, created_at, resolved_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    suggestion_id,
+                    task_id,
+                    message,
+                    _json(classifier_result),
+                    _json(payload),
+                    "pending",
+                    now.isoformat(),
+                    None,
+                ),
+            )
+        return self.get_routing_rule_suggestion(suggestion_id)
+
+    def get_routing_rule_suggestion(self, suggestion_id: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM routing_rule_suggestions WHERE id = ?", (suggestion_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"Routing rule suggestion not found: {suggestion_id}")
+        return self._row_to_routing_rule_suggestion(row)
+
+    def list_routing_rule_suggestions(self, status: str | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM routing_rule_suggestions"
+        params: list[Any] = []
+        if status:
+            sql += " WHERE status = ?"
+            params.append(status)
+        sql += " ORDER BY created_at DESC, id DESC"
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [self._row_to_routing_rule_suggestion(row) for row in rows]
+
+    def set_routing_rule_suggestion_status(self, suggestion_id: str, status: str) -> dict[str, Any]:
+        resolved_at = utc_now().isoformat()
+        suggestion = self.get_routing_rule_suggestion(suggestion_id)
+        rule_status = "active" if status == "promoted" else "rejected"
+        for item in suggestion.get("suggested_rules") or []:
+            rule_id = item.get("rule_id")
+            if rule_id:
+                self.set_routing_rule_status(str(rule_id), rule_status)
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE routing_rule_suggestions SET status = ?, resolved_at = ? WHERE id = ?",
+                (status, resolved_at, suggestion_id),
+            )
+        return self.get_routing_rule_suggestion(suggestion_id)
+
+    def add_routing_feedback(
+        self,
+        task_id: str | None,
+        original_route: dict[str, Any] | None,
+        final_route: dict[str, Any] | None,
+        user_correction: str | None,
+        accepted: bool | None,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        feedback_id = new_id("routing-feedback")
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO routing_feedback (
+                  id, task_id, original_route_json, final_route_json, user_correction,
+                  accepted, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    feedback_id,
+                    task_id,
+                    _json(original_route) if original_route is not None else None,
+                    _json(final_route) if final_route is not None else None,
+                    user_correction,
+                    None if accepted is None else (1 if accepted else 0),
+                    now.isoformat(),
+                ),
+            )
+        return {"id": feedback_id, "task_id": task_id, "accepted": accepted, "created_at": now.isoformat()}
+
+    def add_routing_diagnostic(
+        self,
+        task_id: str | None,
+        message: str,
+        deterministic_result: dict[str, Any] | None,
+        classifier_result: dict[str, Any] | None,
+        final_result: dict[str, Any],
+        used_classifier: bool,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        diagnostic_id = new_id("routing-diagnostic")
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO routing_diagnostics (
+                  id, task_id, message, deterministic_result_json, classifier_result_json,
+                  final_result_json, used_classifier, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    diagnostic_id,
+                    task_id,
+                    message,
+                    _json(deterministic_result) if deterministic_result is not None else None,
+                    _json(classifier_result) if classifier_result is not None else None,
+                    _json(final_result),
+                    1 if used_classifier else 0,
+                    now.isoformat(),
+                ),
+            )
+        return {
+            "id": diagnostic_id,
+            "task_id": task_id,
+            "message": message,
+            "used_classifier": used_classifier,
+            "created_at": now.isoformat(),
+        }
 
     def get_current_approval_gate(self, task_id: str) -> str | None:
         with self.connect() as conn:
@@ -1289,6 +1628,44 @@ class TaskStore:
             created_at=_dt(row["created_at"]),
             updated_at=_dt(row["updated_at"]),
         )
+
+    def _row_to_routing_rule(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "rule_type": row["rule_type"],
+            "pattern_type": row["pattern_type"],
+            "pattern": row["pattern"],
+            "language": row["language"],
+            "target_route_type": row["target_route_type"],
+            "target_workflow_id": row["target_workflow_id"],
+            "target_task_kind": row["target_task_kind"],
+            "target_project_id": row["target_project_id"],
+            "constraints": json.loads(row["constraints_json"]) if row["constraints_json"] else [],
+            "positive_examples": json.loads(row["positive_examples_json"]) if row["positive_examples_json"] else [],
+            "negative_examples": json.loads(row["negative_examples_json"]) if row["negative_examples_json"] else [],
+            "confidence": row["confidence"],
+            "priority": row["priority"],
+            "status": row["status"],
+            "source": row["source"],
+            "source_task_id": row["source_task_id"],
+            "source_message": row["source_message"],
+            "hit_count": row["hit_count"],
+            "false_positive_count": row["false_positive_count"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def _row_to_routing_rule_suggestion(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "task_id": row["task_id"],
+            "message": row["message"],
+            "classifier_result": json.loads(row["classifier_result_json"]),
+            "suggested_rules": json.loads(row["suggested_rules_json"]),
+            "status": row["status"],
+            "created_at": row["created_at"],
+            "resolved_at": row["resolved_at"],
+        }
 
     def _row_to_step(self, row: sqlite3.Row) -> AgentStep:
         return AgentStep(

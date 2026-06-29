@@ -15,6 +15,8 @@ import type {
   ModelDecision,
   PromptBuild,
   RouteDecision,
+  RoutingRule,
+  RoutingSuggestion,
   Task,
   TaskArtifact,
   TaskEvent,
@@ -208,4 +210,32 @@ export async function listRuns(taskId: string): Promise<{ items: AgentRun[]; ava
 export async function listRunSteps(runId: string): Promise<AgentStep[]> {
   const payload = await request<{ items: AgentStep[] } | AgentStep[]>(`/runs/${encodeURIComponent(runId)}/steps`);
   return Array.isArray(payload) ? payload : payload.items;
+}
+
+export async function listRoutingRules(status?: string): Promise<{ items: RoutingRule[] }> {
+  return request<{ items: RoutingRule[] }>("/routing/rules" + params({ status }));
+}
+
+export async function listRoutingSuggestions(status?: string): Promise<{ items: RoutingSuggestion[] }> {
+  return request<{ items: RoutingSuggestion[] }>("/routing/suggestions" + params({ status }));
+}
+
+export function promoteRoutingRule(ruleId: string): Promise<RoutingRule> {
+  return request<RoutingRule>(`/routing/rules/${encodeURIComponent(ruleId)}/promote`, { method: "POST" });
+}
+
+export function rejectRoutingRule(ruleId: string): Promise<RoutingRule> {
+  return request<RoutingRule>(`/routing/rules/${encodeURIComponent(ruleId)}/reject`, { method: "POST" });
+}
+
+export function disableRoutingRule(ruleId: string): Promise<RoutingRule> {
+  return request<RoutingRule>(`/routing/rules/${encodeURIComponent(ruleId)}/disable`, { method: "POST" });
+}
+
+export function promoteRoutingSuggestion(suggestionId: string): Promise<RoutingSuggestion> {
+  return request<RoutingSuggestion>(`/routing/suggestions/${encodeURIComponent(suggestionId)}/promote`, { method: "POST" });
+}
+
+export function rejectRoutingSuggestion(suggestionId: string): Promise<RoutingSuggestion> {
+  return request<RoutingSuggestion>(`/routing/suggestions/${encodeURIComponent(suggestionId)}/reject`, { method: "POST" });
 }

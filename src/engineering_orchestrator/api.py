@@ -9,6 +9,7 @@ from typing import Any, Protocol
 import yaml
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 from engineering_orchestrator.corrections import LinkedTaskDetectionResult, LinkedTaskDetector
 from engineering_orchestrator.harness import ContextBuilder, PromptBuilder
@@ -44,6 +45,8 @@ from engineering_orchestrator.services.validation_service import ValidationServi
 from engineering_orchestrator.services.workflow_registry import WorkflowRegistry
 from engineering_orchestrator.settings import Settings, load_settings
 from engineering_orchestrator.ui import register_ui_routes
+from task_router.adaptive import AdaptiveRoutingDecision, AdaptiveRoutingService, RoutingContext
+from task_router.adaptive.config import load_adaptive_routing_config
 
 
 PRE_EXECUTION_GATE_ORDER = ["spec", "config_change", "migration", "security_change", "deploy_prep"]
@@ -59,6 +62,12 @@ PRE_EXECUTION_GATE_STATUS = {
 class TaskRouterProtocol(Protocol):
     def route(self, message: str) -> Any:
         pass
+
+
+class AdaptiveRouteRequest(BaseModel):
+    message: str
+    context: dict[str, Any] = Field(default_factory=dict)
+    debug: bool = False
 
 
 class Orchestrator:
@@ -77,6 +86,12 @@ class Orchestrator:
         self.model_policy = ModelPolicy(model_policy_path)
         self.model_selector = ModelSelector(self.model_policy, self.projects, self.token_budgets)
         self.prompt_budgeter = PromptBudgeter(token_budgets_path)
+        adaptive_config_path = self._config_path(None, "adaptive_routing.yml")
+        self.adaptive_routing_config = load_adaptive_routing_config(adaptive_config_path)
+        self.adaptive_router = AdaptiveRoutingService(
+            self.adaptive_routing_config,
+            task_resolver=self._resolve_adaptive_task_refs,
+        )
         self.tool_health_service = ToolHealthService(
             self.projects,
             settings.codex_bin,
@@ -244,6 +259,65 @@ class Orchestrator:
     def list_prompt_builds(self, task_id: str):
         self.task_store.get_task(task_id)
         return self.task_store.list_prompt_builds(task_id)
+
+    def route_adaptive(self, message: str, context: RoutingContext | dict[str, Any] | None = None) -> AdaptiveRoutingDecision:
+        routing_context = context if isinstance(context, RoutingContext) else RoutingContext(**(context or {}))
+        return self._run_adaptive_routing(message, routing_context)
+
+    def list_routing_rules(self, status: str | None = None) -> list[dict[str, Any]]:
+        return self.task_store.list_routing_rules(status)
+
+    def create_routing_rule(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.task_store.create_routing_rule(payload)
+
+    def get_routing_rule(self, rule_id: str) -> dict[str, Any]:
+        return self.task_store.get_routing_rule(rule_id)
+
+    def update_routing_rule(self, rule_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.task_store.update_routing_rule(rule_id, payload)
+
+    def promote_routing_rule(self, rule_id: str) -> dict[str, Any]:
+        rule = self.task_store.set_routing_rule_status(rule_id, "active")
+        self._append_routing_eval_cases(rule)
+        return rule
+
+    def reject_routing_rule(self, rule_id: str) -> dict[str, Any]:
+        return self.task_store.set_routing_rule_status(rule_id, "rejected")
+
+    def disable_routing_rule(self, rule_id: str) -> dict[str, Any]:
+        return self.task_store.set_routing_rule_status(rule_id, "disabled")
+
+    def list_routing_suggestions(self, status: str | None = None) -> list[dict[str, Any]]:
+        return self.task_store.list_routing_rule_suggestions(status)
+
+    def get_routing_suggestion(self, suggestion_id: str) -> dict[str, Any]:
+        return self.task_store.get_routing_rule_suggestion(suggestion_id)
+
+    def promote_routing_suggestion(self, suggestion_id: str) -> dict[str, Any]:
+        suggestion = self.task_store.set_routing_rule_suggestion_status(suggestion_id, "promoted")
+        for item in suggestion.get("suggested_rules") or []:
+            rule_id = item.get("rule_id")
+            if rule_id:
+                self._append_routing_eval_cases(self.task_store.get_routing_rule(str(rule_id)))
+        return suggestion
+
+    def reject_routing_suggestion(self, suggestion_id: str) -> dict[str, Any]:
+        return self.task_store.set_routing_rule_suggestion_status(suggestion_id, "rejected")
+
+    def add_routing_feedback(self, payload: dict[str, Any]) -> dict[str, Any]:
+        rule_id = payload.get("rule_id")
+        if rule_id and payload.get("accepted") is False:
+            self.task_store.add_routing_false_positive(
+                str(rule_id),
+                self.adaptive_routing_config.safety.disable_after_false_positives,
+            )
+        return self.task_store.add_routing_feedback(
+            payload.get("task_id"),
+            payload.get("original_route"),
+            payload.get("final_route"),
+            payload.get("user_correction"),
+            payload.get("accepted"),
+        )
 
     def tool_health(self) -> dict[str, Any]:
         return self.tool_health_service.global_report()
@@ -499,8 +573,19 @@ class Orchestrator:
         self.task_store.update_task(task)
 
         route_payload: dict[str, Any] | None = None
-        linked_detection = self.linked_task_detector.detect(task.user_message)
-        if linked_detection.found:
+        linked_detection: LinkedTaskDetectionResult | None = None
+        adaptive_decision = self._run_adaptive_routing(
+            task.user_message,
+            RoutingContext(task_id=task.id, source=task.source, recent_task_ids=[]),
+        )
+        if self._should_use_adaptive_for_task(adaptive_decision):
+            route = self._route_from_adaptive_decision(task, adaptive_decision)
+            route_payload = route.model_dump() | {
+                "adaptive_routing": adaptive_decision.model_dump(mode="json", exclude={"diagnostics"}),
+            }
+        else:
+            linked_detection = self.linked_task_detector.detect(task.user_message)
+        if route_payload is None and linked_detection and linked_detection.found:
             self._record_model_decision(
                 task,
                 None,
@@ -512,11 +597,11 @@ class Orchestrator:
             )
             route = self._route_linked_correction(task, linked_detection)
             route_payload = route.model_dump()
-        elif self.task_router is not None:
+        elif route_payload is None and self.task_router is not None:
             external_route = self.task_router.route(task.user_message)
             route_payload = self._model_dump(external_route)
             route = self._normalize_route_decision(route_payload)
-        else:
+        elif route_payload is None:
             route = self._mock_route_task(task)
             route_payload = route.model_dump()
 
@@ -526,7 +611,7 @@ class Orchestrator:
         task.workflow_id = route.workflow_id
         task.workflow_name = route.workflow_name
         task.risk_level = route.risk_level
-        if linked_detection.found:
+        if linked_detection and linked_detection.found:
             route_payload = {
                 **(route_payload or route.model_dump()),
                 "linked_task_detection": linked_detection.model_dump(mode="json"),
@@ -554,9 +639,278 @@ class Orchestrator:
 
         artifact = self.artifact_store.write_markdown(task, "route_decision", "Route decision", self._route_markdown(task, route))
         self.task_store.add_artifact(artifact)
+        if "adaptive_routing" in (route_payload or {}):
+            self._write_routing_diagnostics(task, adaptive_decision)
         self._add_event(task, "task_routed", route.model_dump())
         self._write_index(self.task_store.get_task(task.id))
         return route
+
+    def _run_adaptive_routing(self, message: str, context: RoutingContext) -> AdaptiveRoutingDecision:
+        active_rules = self.task_store.list_routing_rules("active")
+        recent_tasks = [
+            {
+                "id": task.id,
+                "title": task.user_message[:160],
+                "status": task.status,
+                "project_id": task.project_id,
+            }
+            for task in self.task_store.list_tasks(limit=self.adaptive_routing_config.cheap_classifier.recent_tasks_limit)
+        ]
+
+        def save_suggestions(result) -> list[str]:
+            if not self.adaptive_routing_config.learning.enabled:
+                return []
+            suggestions = [
+                item.model_dump(mode="json")
+                for item in result.learned_rule_suggestions
+                if item.confidence >= self.adaptive_routing_config.learning.min_confidence_for_suggestion
+            ]
+            if not suggestions:
+                return []
+            record = self.task_store.create_routing_rule_suggestion(
+                context.task_id,
+                message,
+                result.model_dump(mode="json"),
+                suggestions,
+            )
+            return [str(item.get("rule_id")) for item in record.get("suggested_rules") or [] if item.get("rule_id")]
+
+        decision = self.adaptive_router.route(
+            message,
+            context,
+            active_rules=active_rules,
+            projects=self.projects.projects,
+            recent_tasks=recent_tasks,
+            save_suggestions=save_suggestions,
+        )
+        diagnostics = decision.diagnostics
+        self.task_store.add_routing_diagnostic(
+            context.task_id,
+            message,
+            diagnostics.get("deterministic_result"),
+            diagnostics.get("classifier_result"),
+            diagnostics.get("final_result") or decision.model_dump(mode="json", exclude={"diagnostics"}),
+            decision.used_classifier,
+        )
+        if decision.used_classifier:
+            request = ModelSelectionRequest(
+                task_id=context.task_id,
+                operation=self.adaptive_routing_config.cheap_classifier.operation,
+                project_id=decision.project_id,
+                workflow_id=decision.workflow_id,
+                estimated_prompt_chars=int(diagnostics.get("classifier_prompt_chars") or 0),
+            )
+            if context.task_id:
+                self._record_model_decision(self.task_store.get_task(context.task_id), None, request)
+            else:
+                selected = self.model_selector.select(request)
+                self.task_store.add_model_decision(
+                    None,
+                    None,
+                    request.operation,
+                    selected.profile,
+                    selected.target_id,
+                    selected.runtime,
+                    selected.model,
+                    selected.reasoning_effort,
+                    selected.reason,
+                    request.estimated_prompt_chars,
+                    selected.max_prompt_chars,
+                )
+        for rule_id in decision.matched_rules:
+            if rule_id.startswith("rule-"):
+                self.task_store.increment_routing_rule_hit(rule_id)
+        return decision
+
+    def _should_use_adaptive_for_task(self, decision: AdaptiveRoutingDecision) -> bool:
+        if decision.requires_clarification and decision.parent_task_candidates:
+            return True
+        if decision.route_type in {"linked_correction", "question", "task_action"} and (
+            decision.parent_task_id or decision.parent_task_candidates
+        ):
+            return True
+        return False
+
+    def _route_from_adaptive_decision(self, task: Task, decision: AdaptiveRoutingDecision) -> RouteDecision:
+        if decision.requires_clarification:
+            warning = decision.reason
+            if decision.clarification_question and decision.clarification_question not in warning:
+                warning = f"{decision.clarification_question} {warning}".strip()
+            route = RouteDecision(
+                normalized_task=task.user_message.strip(),
+                intent="clarify",
+                task_kind=decision.task_kind or "unknown",
+                complexity="trivial",
+                project_id=decision.project_id,
+                project_name=None,
+                project_path=None,
+                workflow_id="clarify",
+                workflow_name="Clarify routing",
+                risk_level="medium",
+                risk_flags=["adaptive_routing_uncertain"],
+                approval_gates=["clarification"],
+                warnings=[warning],
+                rationale=decision.reason,
+                requires_spec=False,
+            )
+            if decision.parent_task_candidates:
+                task.status = "awaiting_parent_task_clarification"
+            return route
+
+        parent = self._get_parent_from_adaptive(decision)
+        if decision.route_type == "linked_correction" and parent is not None:
+            workflow = self.workflows.get("task_correction") or {}
+            task.parent_task_id = parent.id
+            task.related_task_ids = sorted(set([*task.related_task_ids, parent.id]))
+            task.correction_source = "adaptive_routing" if decision.used_classifier or decision.source == "learned_rule" else "linked_task_message"
+            return RouteDecision(
+                normalized_task=task.user_message.strip(),
+                intent="code_change",
+                task_kind=decision.task_kind or "linked_correction",
+                complexity="trivial",
+                project_id=parent.project_id,
+                project_name=parent.project_name,
+                project_path=parent.project_path,
+                workflow_id="task_correction",
+                workflow_name=str(workflow.get("name") or "Task correction"),
+                risk_level="low" if parent.risk_level != "high" else "medium",
+                risk_flags=["linked_task_correction", "adaptive_routing"],
+                approval_gates=list(workflow.get("approval_gates") or ["diff", "commit"]),
+                warnings=[],
+                rationale=decision.reason,
+                requires_spec=False,
+            )
+
+        if decision.route_type in {"question", "task_action"}:
+            workflow = self.workflows.get("question_only") or {}
+            if parent is not None:
+                task.parent_task_id = parent.id
+                task.related_task_ids = sorted(set([*task.related_task_ids, parent.id]))
+                task.project_id = parent.project_id
+            return RouteDecision(
+                normalized_task=task.user_message.strip(),
+                intent="question",
+                task_kind=decision.route_type,
+                complexity="simple",
+                project_id=(parent.project_id if parent else decision.project_id),
+                project_name=(parent.project_name if parent else None),
+                project_path=(parent.project_path if parent else None),
+                workflow_id="question_only",
+                workflow_name=str(workflow.get("name") or "Question only"),
+                risk_level="low",
+                risk_flags=["adaptive_routing"],
+                approval_gates=[],
+                warnings=[],
+                rationale=decision.reason,
+                requires_spec=False,
+            )
+
+        return self._mock_route_task(task)
+
+    def _get_parent_from_adaptive(self, decision: AdaptiveRoutingDecision) -> Task | None:
+        if not decision.parent_task_id:
+            return None
+        try:
+            return self.task_store.get_task(decision.parent_task_id)
+        except KeyError:
+            return None
+
+    def _resolve_adaptive_task_refs(self, refs: list[str], context: RoutingContext) -> tuple[str | None, list[str], str | None]:
+        candidates: list[str] = []
+        for ref in refs:
+            if "-" in ref:
+                try:
+                    task = self.task_store.get_task(ref.upper())
+                    candidates.append(task.id)
+                except KeyError:
+                    continue
+            elif ref.isdigit():
+                matches = [
+                    candidate.id
+                    for candidate in self.task_store.list_tasks(limit=500)
+                    if candidate.id != context.task_id and candidate.id.endswith(f"-{ref}")
+                ]
+                candidates.extend(matches)
+        candidates = sorted(set(candidates))
+        if len(candidates) == 1:
+            return candidates[0], candidates, None
+        if len(candidates) > 1:
+            return None, candidates, f"Task reference is ambiguous: {', '.join(candidates)}."
+        if refs:
+            return None, refs, f"Referenced task was not found: {', '.join(refs)}."
+        return None, [], None
+
+    def _write_routing_diagnostics(self, task: Task, decision: AdaptiveRoutingDecision) -> None:
+        diagnostics = decision.diagnostics
+        markdown = self._routing_diagnostics_markdown(decision)
+        artifact = self.artifact_store.write_markdown(task, "routing_diagnostics", "Routing diagnostics", markdown)
+        json_artifact = self.artifact_store.write_json(task, "routing_diagnostics_json", "Routing diagnostics JSON", diagnostics)
+        self.task_store.add_artifact(artifact)
+        self.task_store.add_artifact(json_artifact)
+
+    def _routing_diagnostics_markdown(self, decision: AdaptiveRoutingDecision) -> str:
+        diagnostics = decision.diagnostics
+        deterministic = diagnostics.get("deterministic_result") or {}
+        classifier = diagnostics.get("classifier_result") or {}
+        suggested = decision.suggested_rule_ids or []
+        return f"""# Routing diagnostics
+
+## Final decision
+
+- Route type: {decision.route_type}
+- Workflow: {decision.workflow_id or "unknown"}
+- Project: {decision.project_id or "unknown"}
+- Parent task: {decision.parent_task_id or "none"}
+- Source: {decision.source}
+- Confidence: {decision.confidence:.2f}
+
+## Deterministic pass
+
+- Confidence: {float(deterministic.get("confidence") or 0):.2f}
+- Matched rules: {", ".join(deterministic.get("matched_rules") or []) or "none"}
+- Reason: {"; ".join(deterministic.get("reasons") or []) or "none"}
+
+## Cheap classifier
+
+- Used: {"yes" if decision.used_classifier else "no"}
+- Model target: cheap_classifier
+- Reason: {classifier.get("reason") or "not used"}
+
+## Suggested rules
+
+{self._bullet_list([f"{rule_id}: pending" for rule_id in suggested])}
+"""
+
+    def _append_routing_eval_cases(self, rule: dict[str, Any]) -> None:
+        if not self.adaptive_routing_config.learning.create_eval_cases:
+            return
+        eval_dir = Path(self.settings.projects_path).resolve().parent.parent / "evals" / "routing"
+        eval_dir.mkdir(parents=True, exist_ok=True)
+        path = eval_dir / "adaptive_rules.yml"
+        lines: list[str] = []
+        for index, example in enumerate(rule.get("positive_examples") or [], 1):
+            lines.extend(
+                [
+                    f"- id: {rule['id']}-positive-{index}",
+                    f"  input: {json.dumps(example, ensure_ascii=False)}",
+                    "  expected:",
+                    f"    route_type: {rule.get('target_route_type') or 'unknown'}",
+                    "",
+                ]
+            )
+        for index, example in enumerate(rule.get("negative_examples") or [], 1):
+            lines.extend(
+                [
+                    f"- id: {rule['id']}-negative-{index}",
+                    f"  input: {json.dumps(example, ensure_ascii=False)}",
+                    "  expected:",
+                    f"    not_route_type: {rule.get('target_route_type') or 'unknown'}",
+                    "",
+                ]
+            )
+        if lines:
+            with path.open("a", encoding="utf-8", newline="\n") as fh:
+                fh.write("\n".join(lines))
 
     def _route_linked_correction(self, task: Task, detection: LinkedTaskDetectionResult) -> RouteDecision:
         parent, warning = self._resolve_parent_task(task, detection)
@@ -2654,6 +3008,87 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health/tools")
     def tool_health():
         return orchestrator.tool_health()
+
+    @app.post("/route/adaptive")
+    def route_adaptive(request: AdaptiveRouteRequest):
+        context = {**request.context, "debug": request.debug or bool(request.context.get("debug"))}
+        decision = orchestrator.route_adaptive(request.message, context)
+        payload = decision.model_dump(mode="json")
+        if not context.get("debug"):
+            payload.pop("diagnostics", None)
+        return payload
+
+    @app.get("/routing/rules")
+    def list_routing_rules(status: str | None = None):
+        return {"items": orchestrator.list_routing_rules(status)}
+
+    @app.post("/routing/rules")
+    def create_routing_rule(payload: dict[str, Any]):
+        return orchestrator.create_routing_rule(payload)
+
+    @app.get("/routing/rules/{rule_id}")
+    def get_routing_rule(rule_id: str):
+        try:
+            return orchestrator.get_routing_rule(rule_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.patch("/routing/rules/{rule_id}")
+    def update_routing_rule(rule_id: str, payload: dict[str, Any]):
+        try:
+            return orchestrator.update_routing_rule(rule_id, payload)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/routing/rules/{rule_id}/promote")
+    def promote_routing_rule(rule_id: str):
+        try:
+            return orchestrator.promote_routing_rule(rule_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/routing/rules/{rule_id}/reject")
+    def reject_routing_rule(rule_id: str):
+        try:
+            return orchestrator.reject_routing_rule(rule_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/routing/rules/{rule_id}/disable")
+    def disable_routing_rule(rule_id: str):
+        try:
+            return orchestrator.disable_routing_rule(rule_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/routing/suggestions")
+    def list_routing_suggestions(status: str | None = None):
+        return {"items": orchestrator.list_routing_suggestions(status)}
+
+    @app.get("/routing/suggestions/{suggestion_id}")
+    def get_routing_suggestion(suggestion_id: str):
+        try:
+            return orchestrator.get_routing_suggestion(suggestion_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/routing/suggestions/{suggestion_id}/promote")
+    def promote_routing_suggestion(suggestion_id: str):
+        try:
+            return orchestrator.promote_routing_suggestion(suggestion_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/routing/suggestions/{suggestion_id}/reject")
+    def reject_routing_suggestion(suggestion_id: str):
+        try:
+            return orchestrator.reject_routing_suggestion(suggestion_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/routing/feedback")
+    def routing_feedback(payload: dict[str, Any]):
+        return orchestrator.add_routing_feedback(payload)
 
     @app.post("/tasks", response_model=CreateTaskResponse)
     def create_task(request: CreateTaskRequest):

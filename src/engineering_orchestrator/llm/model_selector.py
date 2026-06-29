@@ -28,7 +28,7 @@ class ModelSelector:
         target_id, reason = self._target_id(request, profile)
         target = self.policy.target(target_id)
         model = self.policy.resolve_model(str(target.get("model") or "none"))
-        max_prompt_chars = self._max_prompt_chars(request.operation)
+        max_prompt_chars = self._max_prompt_chars(request)
         reasoning_effort = target.get("reasoning_effort")
         if reasoning_effort == "none":
             reasoning_effort = None
@@ -86,7 +86,15 @@ class ModelSelector:
             return "review"
         return request.operation
 
-    def _max_prompt_chars(self, operation: str) -> int:
+    def _max_prompt_chars(self, request: ModelSelectionRequest) -> int:
+        project = self.projects.get(request.project_id or "") if self.projects and request.project_id else None
+        token_policy = (project or {}).get("token_policy") or {}
+        if request.operation == "execute_micro_correction" and token_policy.get("max_correction_prompt_chars"):
+            return int(token_policy["max_correction_prompt_chars"])
+        if request.operation.startswith("execute") and token_policy.get("max_executor_prompt_chars"):
+            return int(token_policy["max_executor_prompt_chars"])
+        if request.operation.startswith("review") and token_policy.get("max_diff_chars_for_llm_review"):
+            return int(token_policy["max_diff_chars_for_llm_review"])
         operation_budgets = self.token_budgets.get("operation_budgets") or {}
         global_budget = self.token_budgets.get("global") or {}
-        return int((operation_budgets.get(operation) or {}).get("max_prompt_chars") or global_budget.get("max_prompt_chars") or 300000)
+        return int((operation_budgets.get(request.operation) or {}).get("max_prompt_chars") or global_budget.get("max_prompt_chars") or 300000)

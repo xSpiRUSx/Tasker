@@ -2,6 +2,10 @@ orchestrator:
   task_id_prefix: "ENG"
   timezone: "Europe/Moscow"
 
+model_policy_path: "./config/model_policy.yml"
+token_budgets_path: "./config/token_budgets.yml"
+runtime_root: "./data/runtime"
+
 storage:
   sqlite_path: "./data/orchestrator.sqlite3"
 

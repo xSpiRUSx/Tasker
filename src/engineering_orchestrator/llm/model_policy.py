@@ -18,7 +18,7 @@ class ModelPolicy:
 
     @property
     def active_profile(self) -> str:
-        return str(self.data.get("active_profile") or "balanced")
+        return str(os.getenv("TASKER_MODEL_PROFILE") or self.data.get("active_profile") or "balanced")
 
     def target(self, target_id: str) -> dict[str, Any]:
         targets = self.data.get("model_targets") or {}

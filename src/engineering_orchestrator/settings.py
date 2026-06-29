@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import load_dotenv
 
 
 def _project_root() -> Path:
@@ -61,6 +62,7 @@ class Settings:
 
 def load_settings(config_path: str | Path | None = None) -> Settings:
     root = _project_root()
+    load_dotenv(root / ".env", override=False)
     path = Path(config_path) if config_path else root / "config" / "orchestrator.yml"
     path = path.resolve()
     base_dir = path.parent.parent if path.parent.name == "config" else path.parent

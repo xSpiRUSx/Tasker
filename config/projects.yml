@@ -20,6 +20,17 @@ projects:
     description: FastAPI billing backend sample project.
     tools:
       - codex
+    default_model_profile: balanced
+    model_overrides:
+      planning: gpt55_medium
+      execution: codex_gpt55_medium
+      correction_micro: codex_spark
+      correction_minor: codex_gpt55_medium
+      review: gpt55_medium
+    token_policy:
+      max_executor_prompt_chars: 300000
+      max_correction_prompt_chars: 120000
+      max_diff_chars_for_llm_review: 60000
     test_commands:
       - pytest
     blocked_paths:
@@ -43,6 +54,17 @@ projects:
     description: Default local project used when the request does not mention a configured project.
     tools:
       - codex
+    default_model_profile: balanced
+    model_overrides:
+      planning: gpt55_medium
+      execution: codex_gpt55_medium
+      correction_micro: codex_spark
+      correction_minor: codex_gpt55_medium
+      review: gpt55_medium
+    token_policy:
+      max_executor_prompt_chars: 300000
+      max_correction_prompt_chars: 120000
+      max_diff_chars_for_llm_review: 60000
     test_commands:
       - python -m pytest
     blocked_paths:
@@ -59,6 +81,17 @@ projects:
     aliases: ["solvix", "solvix_zn", "zn", "зн", "сольвикс"]
     description: Рабочий проект в каталоге C:\Configuration\Solvix_ZN.
     tools: ["codex"]
+    default_model_profile: balanced
+    model_overrides:
+      planning: gpt55_high
+      execution: codex_gpt55_high
+      correction_micro: codex_spark
+      correction_minor: codex_gpt55_medium
+      review: gpt55_high
+    token_policy:
+      max_executor_prompt_chars: 300000
+      max_correction_prompt_chars: 120000
+      max_diff_chars_for_llm_review: 60000
     project_type: 1c
     metadata_root: src/cfe
     external_artifacts_root: external
@@ -87,6 +120,17 @@ projects:
     aliases: ["sq_erp_ext", "sq erp", "erp_ext", "снежная королева", "снежная королева ерп", "ск ерп"]
     description: Проект Снежная королева ЕРП в каталоге C:\Configuration\SQ_ERP\ERP_Ext.
     tools: ["codex", "1c-graph-metadata-mcp"]
+    default_model_profile: balanced
+    model_overrides:
+      planning: gpt55_high
+      execution: codex_gpt55_high
+      correction_micro: codex_spark
+      correction_minor: codex_gpt55_medium
+      review: gpt55_high
+    token_policy:
+      max_executor_prompt_chars: 300000
+      max_correction_prompt_chars: 120000
+      max_diff_chars_for_llm_review: 60000
     project_type: 1c
     metadata_root: src/cfe
     external_artifacts_root: external

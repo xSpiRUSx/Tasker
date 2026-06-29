@@ -150,9 +150,25 @@ The unified app uses YAML files under the root `config` directory:
 - `config/workflows.yml` - workflow eligibility, required gates, and steps.
 - `config/orchestrator.yml` - storage, artifact, approval, router, execution,
   and validation settings.
+- `config/model_policy.yml` - model targets, runtime routes, reasoning effort,
+  and profile defaults.
+- `config/token_budgets.yml` - prompt budgets and forbidden runtime artifacts.
 
 For secrets and provider-specific settings, use environment variables or local
 `.env` files. Do not commit credentials.
+
+Model IDs are intentionally configured outside Python code. Copy `.env.example`
+to `.env` and set:
+
+```powershell
+TASKER_MODEL_PROFILE=balanced
+TASKER_GPT55_MODEL=gpt-5.5
+TASKER_CODEX_SPARK_MODEL=gpt-5.3-codex-spark
+```
+
+Use `TASKER_MODEL_PROFILE=cheap`, `balanced`, `quality`, or `mock` to switch
+the active policy. Per-project overrides live in `config/projects.yml` under
+`model_overrides` and `token_policy`.
 
 ## Real Codex Execution
 

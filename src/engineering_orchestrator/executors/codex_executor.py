@@ -6,29 +6,9 @@ import subprocess
 from pathlib import Path
 
 from engineering_orchestrator.executors.base import ExecutionResult
+from engineering_orchestrator.llm.prompt_bundle import PromptBundle
+from engineering_orchestrator.llm.types import ModelDecision
 from engineering_orchestrator.models import Task, TaskArtifact
-
-
-PROMPT_ARTIFACT_KINDS = {
-    "request",
-    "route_decision",
-    "context_summary",
-    "working_memory",
-    "spec",
-    "todo",
-    "test_plan",
-    "approval_request",
-    "executor_policy",
-    "repair_prompt",
-    "correction_request",
-    "correction_context",
-}
-MAX_PROMPT_ARTIFACT_CHARS = 40_000
-MAX_PROMPT_ARTIFACT_TOTAL_CHARS = 300_000
-
-
-class PromptTooLargeError(ValueError):
-    pass
 
 
 class CodexExecutor:
@@ -36,15 +16,19 @@ class CodexExecutor:
         self,
         artifacts_root: str | Path,
         codex_bin: str = "codex",
-        model: str | None = None,
         timeout_seconds: int = 1800,
     ):
         self.artifacts_root = Path(artifacts_root)
         self.codex_bin = codex_bin
-        self.model = model
         self.timeout_seconds = timeout_seconds
 
-    def execute(self, task: Task, artifacts: list[TaskArtifact]) -> ExecutionResult:
+    def execute(
+        self,
+        task: Task,
+        artifacts: list[TaskArtifact] | None = None,
+        prompt_bundle: PromptBundle | None = None,
+        model_decision: ModelDecision | None = None,
+    ) -> ExecutionResult:
         if not task.worktree_path:
             return ExecutionResult(
                 status="failed",
@@ -61,18 +45,16 @@ class CodexExecutor:
             )
 
         command = [self._resolve_codex_bin(), "exec", "-", "--skip-git-repo-check"]
-        if self.model:
-            command.extend(["--model", self.model])
+        if model_decision and model_decision.model not in {"", "none", "mock"}:
+            command.extend(["--model", model_decision.model])
 
-        try:
-            prompt = self._build_prompt(task, artifacts)
-        except PromptTooLargeError as exc:
+        if prompt_bundle is None:
             return ExecutionResult(
                 status="failed",
                 changed_files=[],
-                summary=f"Codex prompt_too_large: {exc}",
-                logs=str(exc),
+                summary="CodexExecutor requires a PromptBundle built by PromptBudgeter.",
             )
+        prompt = prompt_bundle.prompt
         try:
             completed = subprocess.run(
                 self._windows_command(command),
@@ -121,101 +103,6 @@ class CodexExecutor:
             stdout=completed.stdout,
             stderr=completed.stderr,
         )
-
-    def _build_prompt(self, task: Task, artifacts: list[TaskArtifact]) -> str:
-        is_correction = any(artifact.kind == "correction_request" for artifact in artifacts)
-        artifact_sections = []
-        total_artifact_chars = 0
-        for artifact in self._prompt_artifacts(artifacts):
-            path = self.artifacts_root / artifact.relative_path
-            if not path.exists():
-                continue
-            content = path.read_text(encoding="utf-8")
-            if len(content) > MAX_PROMPT_ARTIFACT_CHARS:
-                content = (
-                    content[:MAX_PROMPT_ARTIFACT_CHARS]
-                    + "\n\n[Artifact truncated before sending to Codex executor. Open the file path above if more context is needed.]"
-                )
-            if total_artifact_chars + len(content) > MAX_PROMPT_ARTIFACT_TOTAL_CHARS:
-                raise PromptTooLargeError(
-                    f"Artifact context exceeds {MAX_PROMPT_ARTIFACT_TOTAL_CHARS} characters before `{artifact.kind}`."
-                )
-            total_artifact_chars += len(content)
-            artifact_sections.append(
-                f"## Artifact: {artifact.title} ({artifact.kind})\n\n"
-                f"Path: {path}\n\n"
-                f"```markdown\n{content}\n```"
-            )
-
-        if is_correction:
-            return f"""
-You are applying a user-requested correction to an already reviewed diff.
-
-Task ID: {task.id}
-Project: {task.project_id} / {task.project_name}
-Workflow: {task.workflow_id} / {task.workflow_name}
-Risk: {task.risk_level}
-
-Original user request:
-{task.user_message}
-
-Instructions:
-- The user review comment is approval to execute this correction.
-- Do not regenerate the full plan.
-- Do not expand task scope.
-- Only modify the current diff according to the correction comment.
-- Do not touch unrelated files.
-- Do not commit changes.
-- Do not change secrets.
-- Do not deploy.
-- Respect any executor policy artifact below, including allowed paths, blocked paths, diff size, and changed-file limits.
-- Run relevant local checks when they are obvious and safe.
-- If the correction cannot be completed, leave clear notes in your final output.
-
-Artifacts:
-
-{chr(10).join(artifact_sections) if artifact_sections else "No readable correction artifacts were provided."}
-""".strip()
-
-        return f"""
-You are Codex running inside an approved task worktree.
-
-Task ID: {task.id}
-Project: {task.project_id} / {task.project_name}
-Workflow: {task.workflow_id} / {task.workflow_name}
-Risk: {task.risk_level}
-
-Original user request:
-{task.user_message}
-
-Instructions:
-- Work only inside the current working directory.
-- Implement the approved plan using the artifacts below.
-- Do not commit changes.
-- Do not change secrets.
-- Do not deploy.
-- Respect any executor policy artifact below, including allowed paths, blocked paths, diff size, and changed-file limits.
-- Prefer small, focused changes.
-- Run relevant local checks when they are obvious and safe.
-- If the task cannot be completed, leave clear notes in your final output.
-
-Artifacts:
-
-{chr(10).join(artifact_sections) if artifact_sections else "No readable artifacts were provided."}
-""".strip()
-
-    def _prompt_artifacts(self, artifacts: list[TaskArtifact]) -> list[TaskArtifact]:
-        latest_by_kind: dict[str, TaskArtifact] = {}
-        for artifact in artifacts:
-            if artifact.kind not in PROMPT_ARTIFACT_KINDS:
-                continue
-            current = latest_by_kind.get(artifact.kind)
-            if current is None or self._artifact_sort_key(artifact) > self._artifact_sort_key(current):
-                latest_by_kind[artifact.kind] = artifact
-        return sorted(latest_by_kind.values(), key=lambda item: (item.kind, item.version or 0, item.created_at))
-
-    def _artifact_sort_key(self, artifact: TaskArtifact) -> tuple[int, str]:
-        return (artifact.version or 0, artifact.created_at.isoformat())
 
     def _resolve_codex_bin(self) -> str:
         return shutil.which(self.codex_bin) or self.codex_bin

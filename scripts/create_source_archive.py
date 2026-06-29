@@ -11,6 +11,9 @@ INCLUDE_ROOTS = [
     "tests",
     "config",
     "docs",
+    "web/src",
+    "web/package.json",
+    "web/package-lock.json",
     "README.md",
     "AGENTS.md",
     "pyproject.toml",
@@ -20,19 +23,24 @@ INCLUDE_ROOTS = [
 EXCLUDE_PATTERNS = [
     "data/**",
     ".venv/**",
+    "dist/**",
+    "web/dist/**",
+    "node_modules/**",
+    "web/node_modules/**",
     "__pycache__/**",
     "*.egg-info/**",
     ".pytest_cache/**",
     "*.sqlite3",
     "*.db",
     "*.log",
+    "*.zip",
 ]
 
 
 def should_exclude(relative_path: str) -> bool:
     normalized = relative_path.replace("\\", "/")
     parts = normalized.split("/")
-    if "__pycache__" in parts or ".pytest_cache" in parts or ".venv" in parts:
+    if "__pycache__" in parts or ".pytest_cache" in parts or ".venv" in parts or "node_modules" in parts:
         return True
     return any(fnmatch.fnmatch(normalized, pattern) for pattern in EXCLUDE_PATTERNS)
 

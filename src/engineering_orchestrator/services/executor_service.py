@@ -20,7 +20,6 @@ class ExecutorService:
             return CodexExecutor(
                 self.artifacts_root,
                 codex_bin=self.settings.codex_bin,
-                model=self.settings.codex_model,
                 timeout_seconds=self.settings.codex_timeout_seconds,
             )
         return MockExecutor()

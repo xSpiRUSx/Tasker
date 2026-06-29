@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Protocol
@@ -673,23 +674,39 @@ class Orchestrator:
         self.task_store.add_artifact(js)
 
     def _write_prompt_manifest_artifact(self, task: Task, manifest) -> None:
+        status_value = getattr(
+            manifest,
+            "status",
+            "ok" if manifest.total_chars <= manifest.budget_chars else "prompt_too_large",
+        )
+        included_entries = [self._prompt_entry_summary(entry) for entry in manifest.included_artifacts]
+        excluded_entries = [self._prompt_entry_exclusion(entry) for entry in manifest.excluded_artifacts]
         content = f"""# Prompt manifest
 
 Operation: `{manifest.operation}`
-Status: `{manifest.status}`
+Status: `{status_value}`
 Total chars: `{manifest.total_chars}`
 Budget chars: `{manifest.budget_chars}`
 
 ## Included artifacts
 
-{self._bullet_list([f"{entry.kind} v{entry.version or 'latest'}: {entry.chars} chars" for entry in manifest.included_artifacts])}
+{self._bullet_list(included_entries)}
 
 ## Excluded artifacts
 
-{self._bullet_list([f"{entry.kind} ({entry.reason or 'excluded'})" for entry in manifest.excluded_artifacts])}
+{self._bullet_list(excluded_entries)}
 """
         artifact = self.artifact_store.write_markdown(task, "prompt_manifest", "Prompt manifest", content)
         self.task_store.add_artifact(artifact)
+
+    def _prompt_entry_summary(self, entry) -> str:
+        data = entry if isinstance(entry, dict) else entry.model_dump(mode="json")
+        version = data.get("version") or "latest"
+        return f"{data.get('kind')} v{version}: {data.get('chars', 0)} chars"
+
+    def _prompt_entry_exclusion(self, entry) -> str:
+        data = entry if isinstance(entry, dict) else entry.model_dump(mode="json")
+        return f"{data.get('kind')} ({data.get('reason') or 'excluded'})"
 
     def _create_plan(self, task: Task, revision_comment: str | None = None):
         task.status = "planning"
@@ -1182,7 +1199,7 @@ Awaiting updated diff approval.
             model=decision.model if self.settings.default_executor == "codex" else None,
             correction_request_id=correction.id if correction else None,
         )
-        self.task_store.add_model_decision(
+        model_decision_record = self.task_store.add_model_decision(
             task.id,
             run.id,
             operation,
@@ -1217,25 +1234,28 @@ Awaiting updated diff approval.
             self._correction_execution_artifacts(task, correction) if is_correction else self.task_store.list_artifacts(task.id)
         )
         prompt_operation = "execute_micro_correction" if is_correction else "execute_code"
-        manifest = self.prompt_budgeter.build_manifest(
+        prompt_bundle = self.prompt_budgeter.build_bundle(
+            task,
             prompt_operation,
             execution_artifacts,
             self.artifact_store.root_path,
-            base_prompt_chars=len(task.user_message),
+            run_id=run.id,
+            model_decision_id=model_decision_record.id,
         )
-        self.task_store.add_prompt_build(
+        prompt_build = self.task_store.add_prompt_build(
             task.id,
             run.id,
-            manifest.operation,
-            manifest.total_chars,
-            manifest.budget_chars,
-            [entry.model_dump(mode="json") for entry in manifest.included_artifacts],
-            [entry.model_dump(mode="json") for entry in manifest.excluded_artifacts],
-            manifest.status,
+            prompt_bundle.operation,
+            prompt_bundle.total_chars,
+            prompt_bundle.budget_chars,
+            prompt_bundle.included_artifacts,
+            prompt_bundle.excluded_artifacts,
+            "ok" if prompt_bundle.total_chars <= prompt_bundle.budget_chars else "prompt_too_large",
         )
-        self._write_prompt_manifest_artifact(task, manifest)
+        prompt_bundle.prompt_build_id = prompt_build.id
+        self._write_prompt_manifest_artifact(task, prompt_bundle)
         try:
-            self.prompt_budgeter.ensure_within_budget(manifest)
+            self.prompt_budgeter.ensure_bundle_within_budget(prompt_bundle)
         except PromptBudgetError as exc:
             task.status = "prompt_too_large"
             self.task_store.update_task(task)
@@ -1243,7 +1263,12 @@ Awaiting updated diff approval.
             self._add_event(task, "prompt_too_large", {"error": str(exc), "run_id": run.id})
             self._write_index(self.task_store.get_task(task.id), "Prompt is too large. Compact context and retry.")
             return self.task_store.get_task(task.id)
-        result = self.executor.execute(task, execution_artifacts)
+        result = self.executor.execute(
+            task,
+            execution_artifacts,
+            prompt_bundle=prompt_bundle,
+            model_decision=decision,
+        )
         execution = self.artifact_store.write_markdown(
             task,
             "execution_log",
@@ -1473,7 +1498,14 @@ Awaiting updated diff approval.
             approval_artifacts.append(diff_patch.id)
 
         reviewed_files = list(result.changed_files)
-        diff_payload = {"approves": ["commit gate", "close task"], "reviewed_files": reviewed_files}
+        diff_payload = {
+            "approves": ["commit gate", "close task"],
+            "reviewed_files": reviewed_files,
+            "approved_diff_hash": self._text_hash(diff_text),
+            "approved_changed_files_hash": self._json_hash(sorted(reviewed_files)),
+            "approved_diff_stat_hash": self._text_hash(diff_stat),
+            "approved_diff_artifact_id": diff_patch.id if diff_patch is not None else None,
+        }
         if not self.settings.require_diff_approval:
             self._add_event(task, "diff_approval_skipped", {"artifact_ids": approval_artifacts})
             self._write_index(self.task_store.get_task(task.id), "Diff approval is disabled by policy.")
@@ -1916,7 +1948,7 @@ Status: `{result.status}`
         task = self.task_store.get_task(task_id)
         guard_error = self._commit_guard_error(task)
         if guard_error:
-            task.status = "changes_requested"
+            task.status = "awaiting_diff_reapproval" if "diff" in guard_error else "changes_requested"
             self.task_store.update_task(task)
             self._add_event(task, "commit_blocked", {"reason": guard_error})
             blocked = self.artifact_store.write_markdown(
@@ -1999,13 +2031,27 @@ Status: `{result.status}`
         try:
             self.git_service.diff_check(worktree)
             current_files = self.git_service.changed_files(worktree)
+            current_diff = self.git_service.diff_patch(worktree)
+            current_diff_stat = self.git_service.diff_stat(worktree)
         except Exception as exc:
             return f"git pre-commit observe failed: {exc}"
         approval = self._approved_diff_approval(task.id)
         payload = approval.requested_payload if approval else {}
         if "reviewed_files" in payload and sorted(list(payload.get("reviewed_files") or [])) != sorted(current_files):
             return "changed files differ from approved diff"
+        if payload.get("approved_changed_files_hash") and payload["approved_changed_files_hash"] != self._json_hash(sorted(current_files)):
+            return "changed files differ from approved diff"
+        if payload.get("approved_diff_hash") and payload["approved_diff_hash"] != self._text_hash(current_diff):
+            return "diff content differs from approved diff"
+        if payload.get("approved_diff_stat_hash") and payload["approved_diff_stat_hash"] != self._text_hash(current_diff_stat):
+            return "diff stat differs from approved diff"
         return None
+
+    def _text_hash(self, value: str) -> str:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    def _json_hash(self, value: Any) -> str:
+        return self._text_hash(json.dumps(value, ensure_ascii=False, sort_keys=True))
 
     def _add_event(self, task: Task, event_type: str, payload: dict | None = None) -> None:
         current = self.task_store.get_task(task.id)

@@ -19,11 +19,22 @@ def test_source_archive_excludes_runtime_data(tmp_path):
     (root / "src").mkdir(parents=True)
     (root / "tests").mkdir()
     (root / "config").mkdir()
+    (root / "web" / "src").mkdir(parents=True)
+    (root / "web" / "dist").mkdir(parents=True)
+    (root / "web" / "node_modules" / "vite").mkdir(parents=True)
+    (root / "dist").mkdir()
     (root / "data" / "worktrees").mkdir(parents=True)
     (root / "data" / "obsidian-tasks").mkdir(parents=True)
     (root / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
     (root / "tests" / "test_app.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
     (root / "config" / "projects.yml").write_text("projects: []\n", encoding="utf-8")
+    (root / "web" / "src" / "App.tsx").write_text("export default function App() { return null }\n", encoding="utf-8")
+    (root / "web" / "package.json").write_text("{}\n", encoding="utf-8")
+    (root / "web" / "package-lock.json").write_text("{}\n", encoding="utf-8")
+    (root / "web" / "dist" / "bundle.js").write_text("build\n", encoding="utf-8")
+    (root / "web" / "node_modules" / "vite" / "index.js").write_text("deps\n", encoding="utf-8")
+    (root / "dist" / "old.zip").write_text("zip\n", encoding="utf-8")
+    (root / "config.zip").write_text("zip\n", encoding="utf-8")
     (root / "data" / "worktrees" / "runtime.txt").write_text("runtime\n", encoding="utf-8")
     (root / "data" / "obsidian-tasks" / "artifact.md").write_text("runtime\n", encoding="utf-8")
     (root / "data" / "orchestrator.sqlite3").write_text("db\n", encoding="utf-8")
@@ -38,4 +49,11 @@ def test_source_archive_excludes_runtime_data(tmp_path):
 
     assert "src/app.py" in names
     assert "tests/test_app.py" in names
+    assert "web/src/App.tsx" in names
+    assert "web/package.json" in names
+    assert "web/package-lock.json" in names
     assert not any(name.startswith("data/") for name in names)
+    assert not any(name.startswith("web/dist/") for name in names)
+    assert not any("node_modules" in name for name in names)
+    assert not any(name.startswith("dist/") for name in names)
+    assert "config.zip" not in names

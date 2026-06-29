@@ -42,6 +42,31 @@ def test_model_policy_routes_core_operations(tmp_path):
     assert micro.target_id == "codex_spark"
 
 
+def test_route_strategy_resolves_to_first_target_without_mock_fallback(tmp_path):
+    orchestrator = Orchestrator(make_settings(tmp_path))
+
+    decision = orchestrator.model_selector.select(
+        ModelSelectionRequest(operation="review_diff", workflow_id="simple_dev_no_config", project_id="billing-api")
+    )
+
+    assert decision.target_id == "deterministic"
+    assert "strategy `deterministic_then_gpt55_medium`" in decision.reason
+
+
+def test_unknown_model_route_fails_loudly(tmp_path):
+    orchestrator = Orchestrator(make_settings(tmp_path))
+    orchestrator.projects.projects[0]["model_overrides"] = {"planning": "missing_strategy"}
+
+    try:
+        orchestrator.model_selector.select(
+            ModelSelectionRequest(operation="create_simple_plan", workflow_id="simple_dev_no_config", project_id="billing-api")
+        )
+    except KeyError as exc:
+        assert "missing_strategy" in str(exc)
+    else:
+        raise AssertionError("Unknown target/strategy did not fail")
+
+
 def test_project_model_override_wins_over_workflow_default(tmp_path):
     orchestrator = Orchestrator(make_settings(tmp_path))
     orchestrator.projects.projects[0]["model_overrides"] = {"planning": "gpt55_high"}

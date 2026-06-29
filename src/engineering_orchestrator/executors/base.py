@@ -4,6 +4,8 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, Field
 
+from engineering_orchestrator.llm.prompt_bundle import PromptBundle
+from engineering_orchestrator.llm.types import ModelDecision
 from engineering_orchestrator.models import Task, TaskArtifact
 
 
@@ -20,5 +22,11 @@ class ExecutionResult(BaseModel):
 
 
 class Executor(Protocol):
-    def execute(self, task: Task, artifacts: list[TaskArtifact]) -> ExecutionResult:
+    def execute(
+        self,
+        task: Task,
+        artifacts: list[TaskArtifact] | None = None,
+        prompt_bundle: PromptBundle | None = None,
+        model_decision: ModelDecision | None = None,
+    ) -> ExecutionResult:
         ...

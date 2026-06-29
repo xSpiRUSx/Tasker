@@ -22,7 +22,19 @@ class ModelPolicy:
 
     def target(self, target_id: str) -> dict[str, Any]:
         targets = self.data.get("model_targets") or {}
-        return dict(targets.get(target_id) or targets.get("mock") or {"runtime": "mock", "model": "mock"})
+        if target_id not in targets:
+            raise KeyError(f"Unknown model target: {target_id}")
+        return dict(targets[target_id])
+
+    def route_strategy(self, strategy_id: str) -> dict[str, Any] | None:
+        strategy = (self.data.get("route_strategies") or {}).get(strategy_id)
+        return dict(strategy) if strategy else None
+
+    def is_target(self, value: str) -> bool:
+        return value in (self.data.get("model_targets") or {})
+
+    def is_strategy(self, value: str) -> bool:
+        return value in (self.data.get("route_strategies") or {})
 
     def resolve_model(self, value: str | None) -> str:
         if not value:

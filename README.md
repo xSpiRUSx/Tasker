@@ -60,10 +60,27 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e ".[dev]"
 python -m pytest
+npm --prefix web run build
 uvicorn engineering_assistant.api:app --reload
 ```
 
 The API starts on `http://127.0.0.1:8000`.
+
+## Local Validation
+
+Run the backend and frontend checks from the repository root:
+
+```powershell
+python -m pytest
+npm --prefix web run build
+```
+
+Create a clean source archive without runtime data, build output, SQLite
+databases, logs, `node_modules`, or generated zips:
+
+```powershell
+python scripts\export_source.py --output dist\tasker-source.zip
+```
 
 Configure local storage explicitly when needed:
 

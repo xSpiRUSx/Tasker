@@ -26,6 +26,9 @@ class ModelSelector:
     def select(self, request: ModelSelectionRequest) -> ModelDecision:
         profile = self._profile(request)
         target_id, reason = self._target_id(request, profile)
+        target_id, strategy_reason = self._resolve_strategy(target_id)
+        if strategy_reason:
+            reason = f"{reason}; {strategy_reason}"
         target = self.policy.target(target_id)
         model = self.policy.resolve_model(str(target.get("model") or "none"))
         max_prompt_chars = self._max_prompt_chars(request)
@@ -72,6 +75,19 @@ class ModelSelector:
             self.policy.profile_default(profile, request.requires_code_execution),
             f"profile `{profile}` default",
         )
+
+    def _resolve_strategy(self, target_or_strategy: str) -> tuple[str, str | None]:
+        if self.policy.is_target(target_or_strategy):
+            return target_or_strategy, None
+        strategy = self.policy.route_strategy(target_or_strategy)
+        if not strategy:
+            raise KeyError(f"Unknown model target or route strategy: {target_or_strategy}")
+        first = str(strategy.get("first") or "")
+        if not first:
+            raise KeyError(f"Route strategy `{target_or_strategy}` does not define `first` target.")
+        if not self.policy.is_target(first):
+            raise KeyError(f"Route strategy `{target_or_strategy}` references unknown target `{first}`.")
+        return first, f"strategy `{target_or_strategy}` selected first target `{first}`"
 
     def _project_override_key(self, request: ModelSelectionRequest) -> str:
         if request.operation == "execute_micro_correction":

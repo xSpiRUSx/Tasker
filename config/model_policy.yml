@@ -73,6 +73,23 @@ model_targets:
     reasoning_effort: high
     purpose: "Complex code execution in worktree"
 
+route_strategies:
+  deterministic_then_gpt55_medium:
+    first: deterministic
+    fallback: gpt55_medium
+
+  deterministic_then_gpt55_high:
+    first: deterministic
+    fallback: gpt55_high
+
+  medium_then_high:
+    first: gpt55_medium
+    fallback: gpt55_high
+
+  high_then_extra_high:
+    first: gpt55_high
+    fallback: gpt55_extra_high
+
 operation_routes:
   route_task:
     first: deterministic

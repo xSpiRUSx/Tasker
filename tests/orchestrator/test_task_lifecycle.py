@@ -334,6 +334,7 @@ def test_commit_requires_fresh_diff_approval(tmp_path):
     task = orchestrator.task_store.get_task(response.task_id)
     task.worktree_path = str(repo)
     orchestrator.task_store.update_task(task)
+    (repo / "tracked.txt").write_text("approved change\n", encoding="utf-8", newline="\n")
 
     task = orchestrator.decide_approval(response.task_id, "plan", ApprovalDecisionRequest(decision="approve"))
     assert task.status == "awaiting_diff_approval"
@@ -343,7 +344,7 @@ def test_commit_requires_fresh_diff_approval(tmp_path):
     (repo / "tracked.txt").write_text("after approval\n", encoding="utf-8", newline="\n")
     task = orchestrator.decide_approval(response.task_id, "commit", ApprovalDecisionRequest(decision="approve"))
 
-    assert task.status == "changes_requested"
-    assert "changed files differ" in orchestrator.artifact_store.read_text(
+    assert task.status == "awaiting_diff_reapproval"
+    assert "diff content differs" in orchestrator.artifact_store.read_text(
         orchestrator.task_store.get_artifact(task.id, "commit_result")
     )

@@ -25,6 +25,7 @@ TaskStatus = Literal[
     "reviewing",
     "validation_failed",
     "awaiting_diff_approval",
+    "awaiting_diff_reapproval",
     "changes_requested",
     "correction_requested",
     "classifying_correction",

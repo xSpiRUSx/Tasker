@@ -43,3 +43,22 @@ projects:
     risky_areas:
       - security
       - migrations
+
+  - id: sq_erp_ext
+    name: SQ ERP Extension
+    path: .
+    aliases:
+      - sq_erp_ext
+      - sq erp
+      - erp_ext
+    description: 1C extension fixture project.
+    tools:
+      - codex
+    project_type: 1c
+    validation_profile: 1c
+    test_commands: []
+    risky_areas:
+      - roles
+      - permissions
+      - exchange
+      - registers

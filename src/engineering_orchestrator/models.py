@@ -11,6 +11,7 @@ TaskStatus = Literal[
     "routing",
     "routed",
     "awaiting_clarification",
+    "awaiting_parent_task_clarification",
     "planning",
     "awaiting_plan_approval",
     "awaiting_spec_approval",
@@ -109,6 +110,9 @@ class Task(BaseModel):
     risk_level: str | None = None
 
     route_decision: dict[str, Any] | None = None
+    parent_task_id: str | None = None
+    related_task_ids: list[str] = Field(default_factory=list)
+    correction_source: str | None = None
 
     branch_name: str | None = None
     worktree_path: str | None = None

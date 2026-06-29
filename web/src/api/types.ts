@@ -53,6 +53,9 @@ export interface Task {
   workflow_name?: string | null;
   risk_level?: string | null;
   route_decision?: Record<string, unknown> | null;
+  parent_task_id?: string | null;
+  related_task_ids?: string[];
+  correction_source?: string | null;
   branch_name?: string | null;
   worktree_path?: string | null;
   artifacts_dir?: string | null;

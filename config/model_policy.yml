@@ -104,9 +104,16 @@ operation_routes:
     fallback: gpt55_medium
     escalate_to: gpt55_high
 
+  detect_linked_task:
+    first: deterministic
+    fallback: gpt55_medium
+
   create_simple_plan:
     first: gpt55_medium
     escalate_to: gpt55_high
+
+  create_1c_bugfix_patch_plan:
+    first: gpt55_medium
 
   create_complex_spec:
     first: gpt55_high
@@ -119,6 +126,10 @@ operation_routes:
   execute_micro_correction:
     first: codex_spark
     prompt_mode: compact_correction
+
+  execute_1c_bugfix_patch:
+    first: codex_spark
+    fallback: codex_gpt55_medium
 
   execute_simple_code_change:
     first: codex_gpt55_medium
@@ -148,7 +159,11 @@ operation_routes:
     fallback: gpt55_high
 
   commit_message:
-    first: gpt55_medium
+    first: deterministic
+    fallback: gpt55_medium
+
+  git_commit:
+    first: deterministic
 
   evaluate_policy:
     first: deterministic
@@ -166,6 +181,19 @@ workflow_routes:
       micro: codex_spark
       minor: codex_gpt55_medium
     review: deterministic_then_gpt55_medium
+    commit_message: deterministic
+    commit: deterministic
+
+  1c_bugfix_patch:
+    planning: gpt55_medium
+    execution: codex_spark
+    correction:
+      micro: codex_spark
+      minor: codex_gpt55_medium
+      risky: codex_gpt55_high
+    review: deterministic_then_gpt55_medium
+    commit_message: deterministic
+    commit: deterministic
 
   simple_dev_with_config:
     planning: gpt55_high
@@ -194,7 +222,12 @@ workflow_routes:
     correction: codex_gpt55_high
 
   task_correction:
-    classify: gpt55_medium
+    classify: deterministic_then_gpt55_medium
     planning: none
-    execution: codex_spark
+    execution:
+      micro: codex_spark
+      minor: codex_gpt55_medium
+      risky: codex_gpt55_high
     review: deterministic_then_gpt55_medium
+    commit_message: deterministic
+    commit: deterministic

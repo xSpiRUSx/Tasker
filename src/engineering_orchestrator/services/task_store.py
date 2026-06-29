@@ -71,6 +71,9 @@ class TaskStore:
                   workflow_name TEXT,
                   risk_level TEXT,
                   route_decision_json TEXT,
+                  parent_task_id TEXT,
+                  related_task_ids_json TEXT,
+                  correction_source TEXT,
                   branch_name TEXT,
                   worktree_path TEXT,
                   artifacts_dir TEXT,
@@ -252,6 +255,9 @@ class TaskStore:
             self._ensure_column(conn, "agent_runs", "correction_request_id", "TEXT")
             self._ensure_column(conn, "jobs", "input_json", "TEXT")
             self._ensure_column(conn, "jobs", "result_json", "TEXT")
+            self._ensure_column(conn, "tasks", "parent_task_id", "TEXT")
+            self._ensure_column(conn, "tasks", "related_task_ids_json", "TEXT")
+            self._ensure_column(conn, "tasks", "correction_source", "TEXT")
 
     def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
         columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -282,8 +288,9 @@ class TaskStore:
                 INSERT INTO tasks (
                   id, status, user_message, source, user_id, project_id, project_name,
                   project_path, workflow_id, workflow_name, risk_level, route_decision_json,
+                  parent_task_id, related_task_ids_json, correction_source,
                   branch_name, worktree_path, artifacts_dir, created_at, updated_at, closed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 self._task_values(task),
             )
@@ -361,7 +368,8 @@ class TaskStore:
                 UPDATE tasks SET
                   status = ?, user_message = ?, source = ?, user_id = ?, project_id = ?,
                   project_name = ?, project_path = ?, workflow_id = ?, workflow_name = ?,
-                  risk_level = ?, route_decision_json = ?, branch_name = ?, worktree_path = ?,
+                  risk_level = ?, route_decision_json = ?, parent_task_id = ?,
+                  related_task_ids_json = ?, correction_source = ?, branch_name = ?, worktree_path = ?,
                   artifacts_dir = ?, created_at = ?, updated_at = ?, closed_at = ?
                 WHERE id = ?
                 """,
@@ -377,6 +385,9 @@ class TaskStore:
                     task.workflow_name,
                     task.risk_level,
                     _json(task.route_decision) if task.route_decision is not None else None,
+                    task.parent_task_id,
+                    _json(task.related_task_ids),
+                    task.correction_source,
                     task.branch_name,
                     task.worktree_path,
                     task.artifacts_dir,
@@ -1125,6 +1136,9 @@ class TaskStore:
             task.workflow_name,
             task.risk_level,
             _json(task.route_decision) if task.route_decision is not None else None,
+            task.parent_task_id,
+            _json(task.related_task_ids),
+            task.correction_source,
             task.branch_name,
             task.worktree_path,
             task.artifacts_dir,
@@ -1148,6 +1162,11 @@ class TaskStore:
             workflow_name=row["workflow_name"],
             risk_level=row["risk_level"],
             route_decision=route_decision,
+            parent_task_id=row["parent_task_id"] if "parent_task_id" in row.keys() else None,
+            related_task_ids=json.loads(row["related_task_ids_json"])
+            if "related_task_ids_json" in row.keys() and row["related_task_ids_json"]
+            else [],
+            correction_source=row["correction_source"] if "correction_source" in row.keys() else None,
             branch_name=row["branch_name"],
             worktree_path=row["worktree_path"],
             artifacts_dir=row["artifacts_dir"],

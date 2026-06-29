@@ -35,11 +35,24 @@ def test_model_policy_routes_core_operations(tmp_path):
             requires_code_execution=True,
         )
     )
+    bugfix = orchestrator.model_selector.select(
+        ModelSelectionRequest(
+            operation="execute_1c_bugfix_patch",
+            workflow_id="1c_bugfix_patch",
+            project_id="sq_erp_ext",
+            requires_code_execution=True,
+        )
+    )
+    commit_message = orchestrator.model_selector.select(ModelSelectionRequest(operation="commit_message"))
+    git_commit = orchestrator.model_selector.select(ModelSelectionRequest(operation="git_commit"))
 
     assert route.target_id == "deterministic"
     assert simple.target_id == "gpt55_medium"
     assert high_1c.target_id == "gpt55_high"
     assert micro.target_id == "codex_spark"
+    assert bugfix.target_id == "codex_spark"
+    assert commit_message.target_id == "deterministic"
+    assert git_commit.target_id == "deterministic"
 
 
 def test_route_strategy_resolves_to_first_target_without_mock_fallback(tmp_path):

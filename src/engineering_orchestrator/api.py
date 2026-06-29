@@ -10,6 +10,7 @@ import yaml
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 
+from engineering_orchestrator.corrections import LinkedTaskDetectionResult, LinkedTaskDetector
 from engineering_orchestrator.harness import ContextBuilder, PromptBuilder
 from engineering_orchestrator.llm import ModelPolicy, ModelSelectionRequest, ModelSelector, PromptBudgeter
 from engineering_orchestrator.llm.prompt_budgeter import PromptBudgetError
@@ -94,6 +95,7 @@ class Orchestrator:
         self.validation_service = ValidationService()
         self.review_service = ReviewService()
         self.correction_classifier = CorrectionClassifier()
+        self.linked_task_detector = LinkedTaskDetector()
         self.task_router = task_router
         self.prompt_builder = PromptBuilder()
         self.context_builder = ContextBuilder(
@@ -116,6 +118,11 @@ class Orchestrator:
 
         route = self._route_task(task)
         task = self.task_store.get_task(task.id)
+        task = self.task_store.get_task(task.id)
+        if task.status == "awaiting_parent_task_clarification":
+            self._write_index(task, "Choose the parent task before planning.")
+            return self._create_response(task, None)
+
         if route.workflow_id in {None, "clarify"}:
             task.status = "awaiting_clarification"
             self.task_store.update_task(task)
@@ -124,9 +131,13 @@ class Orchestrator:
             return self._create_response(task, None)
 
         self._collect_context(task)
+        task = self._write_tool_health(task.id)
         if route.workflow_id == "question_only":
             task = self._answer_question_and_close(task.id)
             return self._create_response(task, None)
+        if route.workflow_id == "task_correction":
+            task = self._start_linked_correction(task.id)
+            return self._create_response(task, self._pending_gate(task))
 
         approval = self._create_plan(task)
         if approval is None:
@@ -243,6 +254,22 @@ class Orchestrator:
         artifact = self.artifact_store.write_markdown(task, "tool_health_report", "Tool health", self.tool_health_service.markdown(report))
         self.task_store.add_artifact(artifact)
         return report
+
+    def _write_tool_health(self, task_id: str) -> Task:
+        task = self.task_store.get_task(task_id)
+        report = self.tool_health_service.task_report(task.project_id)
+        if report.get("manual_review_required") or report.get("mode") == "degraded_no_mcp":
+            route = dict(task.route_decision or {})
+            route["planning_mode"] = report.get("mode")
+            route["manual_review_required"] = bool(report.get("manual_review_required"))
+            if report.get("manual_review_required"):
+                route["validation_warning"] = "manual_review_required"
+            task.route_decision = route
+            self.task_store.update_task(task)
+        artifact = self.artifact_store.write_markdown(task, "tool_health_report", "Tool health", self.tool_health_service.markdown(report))
+        self.task_store.add_artifact(artifact)
+        self._add_event(task, "tool_health_checked", {"mode": report.get("mode"), "manual_review_required": report.get("manual_review_required")})
+        return self.task_store.get_task(task.id)
 
     def compact_context(self, task_id: str) -> dict[str, Any]:
         task = self.task_store.get_task(task_id)
@@ -472,7 +499,20 @@ class Orchestrator:
         self.task_store.update_task(task)
 
         route_payload: dict[str, Any] | None = None
-        if self.task_router is not None:
+        linked_detection = self.linked_task_detector.detect(task.user_message)
+        if linked_detection.found:
+            self._record_model_decision(
+                task,
+                None,
+                ModelSelectionRequest(
+                    task_id=task.id,
+                    operation="detect_linked_task",
+                    estimated_prompt_chars=len(task.user_message),
+                ),
+            )
+            route = self._route_linked_correction(task, linked_detection)
+            route_payload = route.model_dump()
+        elif self.task_router is not None:
             external_route = self.task_router.route(task.user_message)
             route_payload = self._model_dump(external_route)
             route = self._normalize_route_decision(route_payload)
@@ -486,8 +526,17 @@ class Orchestrator:
         task.workflow_id = route.workflow_id
         task.workflow_name = route.workflow_name
         task.risk_level = route.risk_level
+        if linked_detection.found:
+            route_payload = {
+                **(route_payload or route.model_dump()),
+                "linked_task_detection": linked_detection.model_dump(mode="json"),
+                "parent_task_id": task.parent_task_id,
+                "related_task_ids": task.related_task_ids,
+                "correction_source": task.correction_source,
+            }
         task.route_decision = route_payload
-        task.status = "routed" if route.workflow_id not in {None, "clarify"} else "awaiting_clarification"
+        if task.status != "awaiting_parent_task_clarification":
+            task.status = "routed" if route.workflow_id not in {None, "clarify"} else "awaiting_clarification"
         self.task_store.update_task(task)
         task = self._rename_artifact_folder_for_route(self.task_store.get_task(task.id))
         self._record_model_decision(
@@ -509,19 +558,124 @@ class Orchestrator:
         self._write_index(self.task_store.get_task(task.id))
         return route
 
+    def _route_linked_correction(self, task: Task, detection: LinkedTaskDetectionResult) -> RouteDecision:
+        parent, warning = self._resolve_parent_task(task, detection)
+        if parent is None:
+            route = RouteDecision(
+                normalized_task=task.user_message.strip(),
+                intent="code_change",
+                task_kind="linked_correction",
+                complexity="trivial",
+                project_id=None,
+                project_name=None,
+                project_path=None,
+                workflow_id="clarify",
+                workflow_name="Clarify missing task info",
+                risk_level="medium",
+                risk_flags=["linked_task_unresolved"],
+                approval_gates=["clarification"],
+                warnings=[warning or "Parent task could not be resolved."],
+                rationale=f"{detection.reason} Parent task resolution needs clarification.",
+                requires_spec=False,
+            )
+            task.status = "awaiting_parent_task_clarification"
+            task.route_decision = route.model_dump() | {
+                "linked_task_detection": detection.model_dump(mode="json"),
+                "clarification_type": "parent_task",
+            }
+            self.task_store.update_task(task)
+            return route
+
+        workflow = self.workflows.get("task_correction") or {}
+        route = RouteDecision(
+            normalized_task=task.user_message.strip(),
+            intent="code_change",
+            task_kind="linked_correction",
+            complexity="trivial",
+            project_id=parent.project_id,
+            project_name=parent.project_name,
+            project_path=parent.project_path,
+            workflow_id="task_correction",
+            workflow_name=str(workflow.get("name") or "Task correction"),
+            risk_level="low" if parent.risk_level != "high" else "medium",
+            risk_flags=["linked_task_correction"],
+            approval_gates=list(workflow.get("approval_gates") or ["diff", "commit"]),
+            warnings=[],
+            rationale=f"{detection.reason} Resolved parent task `{parent.id}`; routed as lightweight correction.",
+            requires_spec=False,
+        )
+        task.parent_task_id = parent.id
+        task.related_task_ids = sorted(set([*task.related_task_ids, parent.id]))
+        task.correction_source = "linked_task_message"
+        return route
+
+    def _resolve_parent_task(self, task: Task, detection: LinkedTaskDetectionResult) -> tuple[Task | None, str | None]:
+        if detection.parent_task_id:
+            try:
+                parent = self.task_store.get_task(detection.parent_task_id)
+            except KeyError:
+                return None, f"Referenced parent task `{detection.parent_task_id}` was not found."
+            if parent.id == task.id:
+                return None, "A task cannot use itself as the parent correction task."
+            return parent, None
+
+        reference = detection.extracted_reference
+        if reference and reference.isdigit():
+            matches = [
+                candidate
+                for candidate in self.task_store.list_tasks(limit=500)
+                if candidate.id != task.id and candidate.id.endswith(f"-{reference}")
+            ]
+            if len(matches) == 1:
+                return matches[0], None
+            if len(matches) > 1:
+                return None, f"Task number `{reference}` matches multiple tasks: {', '.join(item.id for item in matches)}."
+            return None, f"Task number `{reference}` was not found."
+
+        if detection.needs_latest_task_lookup:
+            candidates = [
+                candidate
+                for candidate in self.task_store.list_tasks(limit=50)
+                if candidate.id != task.id
+                and (task.user_id is None or candidate.user_id == task.user_id)
+                and candidate.status != "cancelled"
+            ]
+            if candidates:
+                return candidates[0], None
+            return None, "No previous task is available for this user/context."
+
+        return None, "Parent task reference could not be resolved."
+
     def _mock_route_task(self, task: Task) -> RouteDecision:
         project = self.projects.find_for_message(task.user_message)
         intent, task_kind, complexity = self._classify(task.user_message)
-        workflow = self.workflows.select(intent, task_kind, complexity)
+        workflow = None
+        message_lower = task.user_message.lower()
+        if self._is_1c_project(project):
+            if self._looks_1c_business_change(message_lower):
+                task_kind = "configuration_change"
+                complexity = "medium"
+                workflow = self.workflows.get("1c_business_logic_change")
+            elif self._looks_1c_metadata_change(message_lower):
+                task_kind = "configuration_change"
+                complexity = "medium"
+                workflow = self.workflows.get("simple_dev_with_config")
+            elif self._looks_1c_bugfix_patch(message_lower):
+                task_kind = "code_patch"
+                complexity = "simple"
+                workflow = self.workflows.get("1c_bugfix_patch")
+        if workflow is None:
+            workflow = self.workflows.select(intent, task_kind, complexity)
 
         risk_flags = []
-        message_lower = task.user_message.lower()
         for area in (project or {}).get("risky_areas", []):
             if str(area).lower() in message_lower:
                 risk_flags.append(str(area))
         if task_kind in {"configuration_change", "dependency_change", "security_change"}:
             risk_flags.append(task_kind)
-        risk_level = "high" if risk_flags or complexity in {"complex", "epic"} else "medium"
+        risk_level = "low" if (workflow or {}).get("id") == "1c_bugfix_patch" and not risk_flags else (
+            "high" if risk_flags or complexity in {"complex", "epic"} else "medium"
+        )
 
         return RouteDecision(
             normalized_task=task.user_message.strip(),
@@ -580,6 +734,56 @@ class Orchestrator:
         if any(word in text for word in ["test", "pytest"]):
             return "code_change", "test_update", "simple"
         return "code_change", "bugfix", "simple"
+
+    def _is_1c_project(self, project: dict[str, Any] | None) -> bool:
+        return bool(project and str(project.get("project_type") or "").lower() == "1c")
+
+    def _looks_1c_bugfix_patch(self, text: str) -> bool:
+        patch_signals = [
+            "ошибка запроса",
+            "не работает запрос",
+            "исправь ошибку",
+            "stacktrace",
+            "в одном модуле",
+            "одна функция",
+            "содержимое объекта данных",
+            "temporary table",
+            "query error",
+            "bsl",
+        ]
+        return any(signal in text for signal in patch_signals)
+
+    def _looks_1c_metadata_change(self, text: str) -> bool:
+        metadata_signals = [
+            "форма",
+            "форму",
+            "реквизит",
+            "команд",
+            "роль",
+            "права",
+            "metadata",
+            "requisite",
+            "form",
+            "role",
+            "permission",
+        ]
+        return any(signal in text for signal in metadata_signals)
+
+    def _looks_1c_business_change(self, text: str) -> bool:
+        business_signals = [
+            "акцепт",
+            "ценообраз",
+            "очередь отправки",
+            "обмен",
+            "регистр",
+            "проведение",
+            "документ lifecycle",
+            "business process",
+            "posting",
+            "exchange",
+            "pricing",
+        ]
+        return any(signal in text for signal in business_signals)
 
     def _collect_context(self, task: Task) -> None:
         content = f"""# Context
@@ -640,6 +844,34 @@ class Orchestrator:
             decision.reason,
             request.estimated_prompt_chars,
             decision.max_prompt_chars,
+        )
+        self._write_model_decision_artifacts(task)
+        return record
+
+    def _record_static_model_decision(
+        self,
+        task: Task,
+        run_id: str | None,
+        operation: str,
+        selected_target: str,
+        runtime: str,
+        model: str,
+        reason: str,
+        estimated_prompt_chars: int = 0,
+        max_prompt_chars: int = 0,
+    ):
+        record = self.task_store.add_model_decision(
+            task.id,
+            run_id,
+            operation,
+            self.model_policy.active_profile,
+            selected_target,
+            runtime,
+            model,
+            None,
+            reason,
+            estimated_prompt_chars,
+            max_prompt_chars,
         )
         self._write_model_decision_artifacts(task)
         return record
@@ -716,9 +948,12 @@ Budget chars: `{manifest.budget_chars}`
         context_markdown = self.artifact_store.read_text(context_artifact) if context_artifact else ""
         if revision_comment:
             context_markdown = context_markdown.rstrip() + f"\n\n## Latest correction request\n\n{revision_comment}\n"
-        operation = "create_1c_business_spec" if self.projects.validation_profile(task.project_id) == "1c" else (
-            "create_complex_spec" if route.requires_spec or task.risk_level == "high" else "create_simple_plan"
-        )
+        if task.workflow_id == "1c_bugfix_patch":
+            operation = "create_1c_bugfix_patch_plan"
+        elif self.projects.validation_profile(task.project_id) == "1c":
+            operation = "create_1c_business_spec"
+        else:
+            operation = "create_complex_spec" if route.requires_spec or task.risk_level == "high" else "create_simple_plan"
         self._record_model_decision(
             task,
             None,
@@ -898,6 +1133,99 @@ Budget chars: `{manifest.budget_chars}`
             requires_spec_addendum=correction.requires_spec_addendum,
         )
 
+    def _start_linked_correction(self, task_id: str) -> Task:
+        task = self.task_store.get_task(task_id)
+        if not task.parent_task_id:
+            task.status = "awaiting_parent_task_clarification"
+            self.task_store.update_task(task)
+            self._add_event(task, "linked_correction_blocked", {"reason": "missing_parent_task_id"})
+            self._write_index(task, "Choose the parent task before running this correction.")
+            return self.task_store.get_task(task.id)
+
+        try:
+            parent = self.task_store.get_task(task.parent_task_id)
+        except KeyError:
+            task.status = "awaiting_parent_task_clarification"
+            self.task_store.update_task(task)
+            self._add_event(task, "linked_correction_blocked", {"reason": "parent_task_not_found", "parent_task_id": task.parent_task_id})
+            self._write_index(task, "Parent task was not found.")
+            return self.task_store.get_task(task.id)
+
+        changed_files = self._latest_reviewed_files(parent.id)
+        classifier_result = self.correction_classifier.classify(
+            CorrectionClassifierInput(
+                comment=task.user_message,
+                action="run_without_new_plan",
+                changed_files=changed_files,
+                risk_flags=list((parent.route_decision or {}).get("risk_flags") or []),
+                task_has_approved_plan=True,
+            )
+        )
+        approved_for_execution = (
+            classifier_result.mode in {"micro_correction", "minor_correction"}
+            and not classifier_result.requires_plan_approval
+            and not classifier_result.requires_spec_addendum
+        )
+        correction = self.task_store.create_correction_request(
+            task_id=task.id,
+            source_gate="linked_task_message",
+            source_approval_id=None,
+            source_artifact_id=None,
+            user_comment=task.user_message,
+            mode=classifier_result.mode,
+            status="executing_correction" if approved_for_execution else "correction_requested",
+            approved_for_execution=approved_for_execution,
+            requires_plan_approval=classifier_result.requires_plan_approval,
+            requires_spec_addendum=classifier_result.requires_spec_addendum,
+            classifier_result=classifier_result.model_dump(mode="json"),
+        )
+        self._write_correction_artifacts(task, correction, changed_files)
+        self._record_model_decision(
+            task,
+            None,
+            ModelSelectionRequest(
+                task_id=task.id,
+                operation="classify_correction",
+                workflow_id=task.workflow_id,
+                project_id=task.project_id,
+                risk_level=task.risk_level,
+                estimated_prompt_chars=len(task.user_message),
+            ),
+        )
+        self._record_static_model_decision(
+            task,
+            None,
+            "planning",
+            "skipped",
+            "none",
+            "none",
+            "Micro/minor linked correction does not require full planning.",
+        )
+        self._add_event(
+            task,
+            "linked_correction_created",
+            {
+                "parent_task_id": parent.id,
+                "correction_id": correction.id,
+                "mode": correction.mode,
+                "approved_for_execution": approved_for_execution,
+            },
+        )
+        if approved_for_execution:
+            return self._run_correction_execution(task.id, correction)
+        if classifier_result.mode == "new_task":
+            task.status = "correction_blocked"
+            self.task_store.update_task(task)
+            self._write_index(task, "Linked correction is blocked because it appears to be a separate task.")
+            return self.task_store.get_task(task.id)
+        return self._request_correction_plan_approval(task.id, correction)
+
+    def _latest_reviewed_files(self, task_id: str) -> list[str]:
+        approvals = [approval for approval in self.task_store.list_approvals(task_id) if approval.gate == "diff"]
+        if not approvals:
+            return []
+        return list(approvals[-1].requested_payload.get("reviewed_files") or [])
+
     def _has_approved_plan(self, task_id: str) -> bool:
         return any(approval.gate == "plan" and approval.status == "approved" for approval in self.task_store.list_approvals(task_id))
 
@@ -1004,8 +1332,15 @@ This correction was approved by the user review comment.
     def _correction_context_markdown(self, task: Task, correction: CorrectionRequest, changed_files: list[str]) -> str:
         allowed_paths = self.projects.allowed_paths(task.project_id)
         blocked_paths = self.projects.blocked_paths(task.project_id)
+        parent = None
+        if task.parent_task_id:
+            try:
+                parent = self.task_store.get_task(task.parent_task_id)
+            except KeyError:
+                parent = None
         diff_summary = ""
-        diff_artifact = self.task_store.get_artifact(task.id, "diff_summary")
+        diff_task_id = parent.id if parent else task.id
+        diff_artifact = self.task_store.get_artifact(diff_task_id, "diff_summary")
         if diff_artifact is not None:
             diff_summary = self.artifact_store.read_text(diff_artifact)
             if len(diff_summary) > 5000:
@@ -1039,10 +1374,11 @@ Do not touch unrelated files.
 
 ## Approved task summary
 
-- Task: `{task.id}`
-- Original request: {task.user_message}
+- Task: `{parent.id if parent else task.id}`
+- Original request: {(parent.user_message if parent else task.user_message)}
 - Project: `{task.project_id or "unknown"}`
-- Workflow: `{task.workflow_id or "unknown"}`
+- Workflow: `{parent.workflow_id if parent else task.workflow_id or "unknown"}`
+- Correction task: `{task.id}`
 
 ## Current diff summary
 
@@ -1178,9 +1514,12 @@ Awaiting updated diff approval.
     def _run_execution(self, task_id: str, correction: CorrectionRequest | None = None) -> Task:
         task = self.task_store.get_task(task_id)
         is_correction = correction is not None
-        operation = "execute_micro_correction" if is_correction and correction.mode == "micro_correction" else (
-            "execute_complex_code_change" if task.risk_level == "high" else "execute_simple_code_change"
-        )
+        if is_correction and correction.mode == "micro_correction":
+            operation = "execute_micro_correction"
+        elif task.workflow_id == "1c_bugfix_patch":
+            operation = "execute_1c_bugfix_patch"
+        else:
+            operation = "execute_complex_code_change" if task.risk_level == "high" else "execute_simple_code_change"
         decision = self.model_selector.select(
             ModelSelectionRequest(
                 task_id=task.id,
@@ -1269,27 +1608,27 @@ Awaiting updated diff approval.
             prompt_bundle=prompt_bundle,
             model_decision=decision,
         )
-        execution = self.artifact_store.write_markdown(
-            task,
-            "execution_log",
-            "Execution log",
-            self._execution_markdown(task, result),
-        )
-        self.task_store.add_artifact(execution)
         self._write_executor_result_artifacts(task, result, run.id)
         self._add_event(task, "execution_completed", result.model_dump())
-        self.task_store.add_step(
-            run.id,
-            1,
-            "execute",
-            "passed" if result.status == "success" else "failed",
-            input_summary=f"Executor `{self.settings.default_executor}`",
-            output_summary=result.summary,
-            artifact_ids=[execution.id],
-            error=None if result.status == "success" else result.logs,
-        )
 
         if result.status != "success":
+            execution = self.artifact_store.write_markdown(
+                task,
+                "execution_log",
+                "Execution log",
+                self._execution_markdown(task, result),
+            )
+            self.task_store.add_artifact(execution)
+            self.task_store.add_step(
+                run.id,
+                1,
+                "execute",
+                "failed",
+                input_summary=f"Executor `{self.settings.default_executor}`",
+                output_summary=result.summary,
+                artifact_ids=[execution.id],
+                error=result.logs,
+            )
             task.status = (
                 "prompt_too_large"
                 if "prompt_too_large" in result.summary
@@ -1398,6 +1737,22 @@ Awaiting updated diff approval.
             "passed",
             output_summary=f"{len(result.changed_files)} changed file(s).",
             artifact_ids=[diff_patch.id] if diff_patch is not None else [],
+        )
+        execution = self.artifact_store.write_markdown(
+            task,
+            "execution_log",
+            "Execution log",
+            self._execution_markdown(task, result),
+        )
+        self.task_store.add_artifact(execution)
+        self.task_store.add_step(
+            run.id,
+            1,
+            "execute",
+            "passed",
+            input_summary=f"Executor `{self.settings.default_executor}`",
+            output_summary=result.summary,
+            artifact_ids=[execution.id],
         )
 
         approved_gates = {approval.gate for approval in self.task_store.list_approvals(task.id) if approval.status == "approved"}
@@ -1554,6 +1909,15 @@ Awaiting updated diff approval.
 
     def _request_commit_approval(self, task: Task) -> Task:
         pending = self.task_store.get_pending_approval(task.id, "commit")
+        self._record_static_model_decision(
+            task,
+            None,
+            "commit_message",
+            "deterministic",
+            "deterministic",
+            "none",
+            "Commit message uses the deterministic Tasker template.",
+        )
         commit_message = self._commit_message(task)
         commit_artifact = self.task_store.get_artifact(task.id, "commit_message")
         if commit_artifact is None:
@@ -1831,9 +2195,7 @@ Score: `{evaluation.score if evaluation.score is not None else "none"}`
         else:
             markdown.append("- None.")
         run_md = self.artifact_store.write_markdown(task, "run_report", "Run report", "\n".join(markdown) + "\n")
-        run_json = self.artifact_store.write_json(task, "run_report_json", "Run report JSON", payload)
         self.task_store.add_artifact(run_md)
-        self.task_store.add_artifact(run_json)
 
     def _path_matches(self, path: str, pattern: str) -> bool:
         normalized_pattern = pattern.replace("\\", "/")
@@ -1893,6 +2255,12 @@ Status: `{result.status}`
 
     def _review_markdown_structured(self, result, validation_result, evaluation, diff_stat: str) -> str:
         recommendation = "approve" if evaluation.passed else "request changes"
+        if (
+            getattr(validation_result, "profile", "") == "1c"
+            and validation_result.status == "skipped"
+            and getattr(validation_result, "manual_review_required", False)
+        ):
+            recommendation = "manual_review_required" if evaluation.passed else "request changes"
         validation_lines = [
             f"- `{command.command}`: `{command.status}`"
             for command in getattr(validation_result, "commands", [])
@@ -1919,6 +2287,7 @@ Status: `{result.status}`
 ## Evaluation
 
 - validation: `{validation_result.status}`
+- manual review required: `{'yes' if getattr(validation_result, "manual_review_required", False) else 'no'}`
 - blocked paths: `{"found" if blocked_findings else "none"}`
 - config changes: `{"require approval" if config_findings else "none"}`
 - diff size: `{diff_size}`
@@ -1946,6 +2315,15 @@ Status: `{result.status}`
 
     def _commit_and_close(self, task_id: str) -> Task:
         task = self.task_store.get_task(task_id)
+        self._record_static_model_decision(
+            task,
+            None,
+            "git_commit",
+            "deterministic",
+            "git",
+            "none",
+            "Commit operation is a deterministic GitService call.",
+        )
         guard_error = self._commit_guard_error(task)
         if guard_error:
             task.status = "awaiting_diff_reapproval" if "diff" in guard_error else "changes_requested"
@@ -2002,8 +2380,23 @@ Status: `{result.status}`
         return self.task_store.get_task(task.id)
 
     def _commit_message(self, task: Task) -> str:
-        slug = slugify(task.user_message, fallback="task").replace("-", " ")
-        return f"{task.id}: {slug[:72]}".strip()
+        route = task.route_decision or {}
+        task_kind = str(route.get("task_kind") or "task")
+        commit_type = "fix" if task_kind in {"bugfix", "code_patch", "linked_correction"} else "chore"
+        scope = slugify(task.project_id or "tasker", fallback="tasker").replace("-", "_")
+        summary = slugify(task.user_message, fallback="task").replace("-", " ")[:72].strip()
+        changed_files = self._latest_reviewed_files(task.id)
+        bullets = changed_files[:5] or ["Prepared reviewed task changes."]
+        evaluations = self.task_store.list_evaluations(task.id)
+        validation_status = evaluations[-1].status if evaluations else "not recorded"
+        body = "\n".join(f"- {item}" for item in bullets)
+        return (
+            f"{commit_type}({scope}): {summary}\n\n"
+            f"Task: {task.id}\n\n"
+            f"{body}\n\n"
+            "Validation:\n"
+            f"- {validation_status}"
+        )
 
     def _latest_evaluation_passed(self, task_id: str) -> bool:
         evaluations = self.task_store.list_evaluations(task_id)
@@ -2126,6 +2519,8 @@ Status: `{result.status}`
 
 - Project: `{route.project_id}`
 - Workflow: `{route.workflow_id}`
+- Parent task: `{task.parent_task_id or "none"}`
+- Correction source: `{task.correction_source or "none"}`
 - Intent: `{route.intent}`
 - Task kind: `{route.task_kind}`
 - Complexity: `{route.complexity}`

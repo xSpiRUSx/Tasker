@@ -11,6 +11,7 @@ INCLUDE_ROOTS = [
     "tests",
     "config",
     "docs",
+    "scripts",
     "web/src",
     "web/package.json",
     "web/package-lock.json",
@@ -22,6 +23,9 @@ INCLUDE_ROOTS = [
 
 EXCLUDE_PATTERNS = [
     "data/**",
+    "runtime/**",
+    "worktrees/**",
+    "obsidian-tasks/**",
     ".venv/**",
     "dist/**",
     "web/dist/**",
@@ -34,6 +38,11 @@ EXCLUDE_PATTERNS = [
     "*.db",
     "*.log",
     "*.zip",
+    "*.epf",
+    "*.erf",
+    "*.dt",
+    "*.cf",
+    "*.cfe",
 ]
 
 

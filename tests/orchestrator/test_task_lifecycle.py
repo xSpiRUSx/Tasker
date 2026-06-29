@@ -57,7 +57,7 @@ def test_full_mvp_lifecycle(tmp_path):
     assert task.status == "awaiting_diff_approval"
     assert orchestrator.task_store.get_pending_approval(task.id, "diff") is not None
     assert orchestrator.task_store.get_artifact(task.id, "run_report") is not None
-    assert orchestrator.task_store.get_artifact(task.id, "run_report_json") is not None
+    assert orchestrator.task_store.get_artifact(task.id, "run_report_json") is None
     assert orchestrator.task_store.get_artifact(task.id, "evaluation_report") is not None
     runs = orchestrator.list_runs(task.id)
     assert len(runs) == 1
@@ -253,6 +253,63 @@ def test_1c_validation_without_validator_is_skipped_manual_review(tmp_path):
     assert "Status: `skipped`" in report
     assert "Profile: `1c`" in report
     assert "Manual review required: `yes`" in report
+    review = orchestrator.task_store.get_artifact(task.id, "review_report")
+    assert review is not None
+    assert "manual_review_required" in orchestrator.artifact_store.read_text(review)
+
+
+def test_linked_task_message_routes_to_task_correction_without_full_plan(tmp_path):
+    orchestrator = Orchestrator(make_settings(tmp_path))
+    parent_response = orchestrator.create_task(CreateTaskRequest(message="Fix billing-api login bug", user_id="alexey"))
+    parent = orchestrator.decide_approval(parent_response.task_id, "plan", ApprovalDecisionRequest(decision="approve"))
+    orchestrator.decide_approval(parent.id, "diff", ApprovalDecisionRequest(decision="approve"))
+
+    response = orchestrator.create_task(
+        CreateTaskRequest(
+            message=f"Есть замечания по задаче {parent.id[-5:]}: Limit the diff to auth.py",
+            user_id="alexey",
+        )
+    )
+    task = orchestrator.task_store.get_task(response.task_id)
+
+    assert response.workflow_id == "task_correction"
+    assert task.parent_task_id == parent.id
+    assert task.correction_source == "linked_task_message"
+    assert task.status == "awaiting_correction_diff_approval"
+    assert orchestrator.task_store.get_artifact(task.id, "correction_request", version=1) is not None
+    assert orchestrator.task_store.get_artifact(task.id, "todo", version=1) is None
+    assert orchestrator.task_store.get_artifact(task.id, "test_plan", version=1) is None
+    assert orchestrator.task_store.get_artifact(task.id, "approval_request", version=1) is None
+
+
+def test_unknown_linked_task_reference_asks_for_parent_clarification(tmp_path):
+    orchestrator = Orchestrator(make_settings(tmp_path))
+
+    response = orchestrator.create_task(CreateTaskRequest(message="Есть замечания по задаче 99999: исправить текст"))
+
+    task = orchestrator.task_store.get_task(response.task_id)
+    assert task.status == "awaiting_parent_task_clarification"
+    assert task.workflow_id == "clarify"
+    assert "99999" in (task.route_decision or {})["warnings"][0]
+
+
+def test_one_file_1c_query_error_routes_to_bugfix_patch(tmp_path):
+    orchestrator = Orchestrator(make_settings(tmp_path))
+
+    response = orchestrator.create_task(
+        CreateTaskRequest(
+            message=(
+                "sq_erp_ext исправь ошибку запроса: Содержимое объекта данных может быть "
+                "выбрано только во временную таблицу."
+            )
+        )
+    )
+
+    task = orchestrator.task_store.get_task(response.task_id)
+    assert response.workflow_id == "1c_bugfix_patch"
+    assert task.route_decision["task_kind"] == "code_patch"
+    assert task.risk_level == "low"
+    assert orchestrator.task_store.get_artifact(task.id, "spec", version=1) is None
 
 
 def test_validation_failure_stops_before_diff_approval(tmp_path):

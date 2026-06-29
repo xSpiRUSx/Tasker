@@ -52,6 +52,43 @@ workflows:
       - review_diff
       - commit
 
+  - id: 1c_bugfix_patch
+    name: 1C focused bugfix patch
+    project_ids: ["*"]
+    project_types: ["1c"]
+    intents: ["code_change"]
+    task_kinds: ["bugfix", "code_patch", "inline_code_or_query"]
+    complexity: ["trivial", "simple", "medium"]
+    requires_spec: false
+    requires_tests: true
+    requires_review: true
+    requires_config_approval: false
+    approval_gates: ["plan", "diff", "commit"]
+    steps:
+      - collect_context
+      - create_lightweight_plan
+      - implement
+      - validate
+      - review_diff
+      - commit
+
+  - id: task_correction
+    name: Linked task correction
+    project_ids: ["*"]
+    intents: ["code_change"]
+    task_kinds: ["linked_correction", "bugfix", "code_patch"]
+    complexity: ["trivial", "simple", "medium"]
+    requires_spec: false
+    requires_tests: true
+    requires_review: true
+    approval_gates: ["diff", "commit"]
+    steps:
+      - resolve_parent_task
+      - classify_correction
+      - execute_compact_correction
+      - review_diff
+      - commit
+
   - id: simple_dev_with_config
     name: Simple development with config changes
     project_ids: ["*"]

@@ -232,6 +232,8 @@ class ArtifactStore:
 - Project: `{task.project_id or "unknown"}`
 - Workflow: `{task.workflow_id or "unknown"}`
 - Risk: `{task.risk_level or "unknown"}`
+- Parent task: `{task.parent_task_id or "none"}`
+- Correction source: `{task.correction_source or "none"}`
 
 ## Artifacts
 

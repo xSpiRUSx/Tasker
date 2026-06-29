@@ -22,6 +22,8 @@ ApprovalGate = Literal[
 TaskKind = Literal[
     "question",
     "bugfix",
+    "code_patch",
+    "linked_correction",
     "feature",
     "refactor",
     "test_update",
@@ -40,6 +42,8 @@ TaskKind = Literal[
 WorkflowTaskKind = Literal[
     "question",
     "bugfix",
+    "code_patch",
+    "linked_correction",
     "feature",
     "refactor",
     "test_update",

@@ -7,9 +7,11 @@ from engineering_orchestrator.services.project_registry import ProjectRegistry
 
 OPERATION_PHASE = {
     "create_simple_plan": "planning",
+    "create_1c_bugfix_patch_plan": "planning",
     "create_complex_spec": "planning",
     "create_1c_business_spec": "planning",
     "execute_code": "execution",
+    "execute_1c_bugfix_patch": "execution",
     "execute_simple_code_change": "execution",
     "execute_complex_code_change": "execution",
     "execute_micro_correction": "correction",

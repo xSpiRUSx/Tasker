@@ -47,6 +47,12 @@ export function TaskDetail({ approvals, busy, onCancel, onCorrection, onRefresh,
   }
 
   const pendingApproval = approvals.find((approval) => approval.status === "pending") || null;
+  const routeDecision = selectedTask.route_decision || {};
+  const correctionMode = routeDecision.correction_mode || routeDecision.task_kind;
+  const manualReviewRequired =
+    routeDecision.manual_review_required === true ||
+    routeDecision.planning_mode === "degraded_no_mcp" ||
+    routeDecision.validation_warning === "manual_review_required";
 
   return (
     <main className="main">
@@ -74,11 +80,27 @@ export function TaskDetail({ approvals, busy, onCancel, onCorrection, onRefresh,
               <dd>
                 {selectedTask.project_id || "unknown"} / {selectedTask.workflow_id || "unknown"}
               </dd>
+              <dt>Parent task</dt>
+              <dd>{selectedTask.parent_task_id || "none"}</dd>
+              <dt>Correction</dt>
+              <dd>
+                {selectedTask.correction_source
+                  ? `${String(correctionMode || "correction")} / ${selectedTask.correction_source}`
+                  : "none"}
+              </dd>
               <dt>Risk</dt>
               <dd>{selectedTask.risk_level || "unknown"}</dd>
             </dl>
+            {selectedTask.workflow_id === "task_correction" ? (
+              <p className="task-header__warning">
+                No full plan required. Final diff approval will still be required.
+              </p>
+            ) : null}
+            {manualReviewRequired ? (
+              <p className="task-header__warning">1C validation skipped. Manual review required.</p>
+            ) : null}
             <h3>Route decision</h3>
-            <pre className="json-block">{JSON.stringify(selectedTask.route_decision || {}, null, 2)}</pre>
+            <pre className="json-block">{JSON.stringify(routeDecision, null, 2)}</pre>
           </div>
           <div className="action-stack">
             <ActionPanel

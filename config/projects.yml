@@ -97,6 +97,12 @@ projects:
     external_artifacts_root: external
     validation_profile: 1c
     test_commands: []
+    external_processing:
+      source_root: "src/epf"
+      build_tool: none
+      package_command: null
+      output_dir: "data/outputs/{task_id}"
+      manual_build_required: true
     blocked_paths:
       - .env
       - .env.*
@@ -136,6 +142,12 @@ projects:
     external_artifacts_root: external
     validation_profile: 1c
     test_commands: []
+    external_processing:
+      source_root: "src/epf"
+      build_tool: none
+      package_command: null
+      output_dir: "data/outputs/{task_id}"
+      manual_build_required: true
     blocked_paths:
       - .env
       - .env.*

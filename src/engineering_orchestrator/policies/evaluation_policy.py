@@ -21,6 +21,14 @@ class EvaluationPolicy:
             findings.append({"code": "executor_failed", "severity": "error", "message": f"Executor status: {executor_status}"})
         if validation_status == "failed":
             findings.append({"code": "validation_failed", "severity": "error", "message": "Validation commands failed."})
+        if validation_status == "manual_review_required":
+            findings.append(
+                {
+                    "code": "manual_review_required",
+                    "severity": "warning",
+                    "message": "Automated validation was skipped; manual review is required.",
+                }
+            )
         if len(changed_files) > max_changed_files:
             findings.append(
                 {
@@ -44,6 +52,8 @@ class EvaluationPolicy:
             return False, "awaiting_human", findings
         if "validation_failed" in codes:
             return False, "repairable", findings
+        if "manual_review_required" in codes:
+            return False, "manual_review_required", findings
         if findings:
             return False, "failed", findings
         return True, "passed", []

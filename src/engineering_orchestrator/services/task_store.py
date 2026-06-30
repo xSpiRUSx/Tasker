@@ -313,6 +313,64 @@ class TaskStore:
                   used_classifier INTEGER NOT NULL,
                   created_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS clarifications (
+                  id TEXT PRIMARY KEY,
+                  task_id TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  missing_info_json TEXT NOT NULL,
+                  proposed_project_id TEXT,
+                  proposed_workflow_id TEXT,
+                  user_response_json TEXT,
+                  created_at TEXT NOT NULL,
+                  resolved_at TEXT,
+                  FOREIGN KEY(task_id) REFERENCES tasks(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS tool_health_overrides (
+                  approval_id TEXT PRIMARY KEY,
+                  task_id TEXT NOT NULL,
+                  missing_tools_json TEXT NOT NULL,
+                  degraded_mode TEXT NOT NULL,
+                  approved INTEGER NOT NULL,
+                  created_at TEXT NOT NULL,
+                  FOREIGN KEY(task_id) REFERENCES tasks(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS scope_escalations (
+                  id TEXT PRIMARY KEY,
+                  task_id TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  reason TEXT NOT NULL,
+                  changed_files_json TEXT NOT NULL,
+                  source_intent TEXT,
+                  approval_id TEXT,
+                  created_at TEXT NOT NULL,
+                  resolved_at TEXT,
+                  FOREIGN KEY(task_id) REFERENCES tasks(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS diff_approvals (
+                  approval_id TEXT PRIMARY KEY,
+                  task_id TEXT NOT NULL,
+                  diff_hash TEXT NOT NULL,
+                  changed_files_hash TEXT NOT NULL,
+                  diff_artifact_id TEXT,
+                  created_at TEXT NOT NULL,
+                  FOREIGN KEY(task_id) REFERENCES tasks(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS package_outputs (
+                  id TEXT PRIMARY KEY,
+                  task_id TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  source_paths_json TEXT,
+                  output_paths_json TEXT,
+                  manual_build_required INTEGER NOT NULL,
+                  logs_path TEXT,
+                  created_at TEXT NOT NULL,
+                  FOREIGN KEY(task_id) REFERENCES tasks(id)
+                );
                 """
             )
             self._ensure_column(conn, "agent_runs", "correction_request_id", "TEXT")
@@ -623,6 +681,249 @@ class TaskStore:
                 (task_id,),
             ).fetchall()
         return [self._row_to_approval(row) for row in rows]
+
+    def create_clarification(
+        self,
+        task_id: str,
+        missing_info: list[str],
+        proposed_project_id: str | None,
+        proposed_workflow_id: str | None,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        record = {
+            "id": new_id("clarification"),
+            "task_id": task_id,
+            "status": "pending",
+            "missing_info": missing_info,
+            "proposed_project_id": proposed_project_id,
+            "proposed_workflow_id": proposed_workflow_id,
+            "user_response": None,
+            "created_at": now.isoformat(),
+            "resolved_at": None,
+        }
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO clarifications (
+                  id, task_id, status, missing_info_json, proposed_project_id,
+                  proposed_workflow_id, user_response_json, created_at, resolved_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record["id"],
+                    task_id,
+                    record["status"],
+                    _json(missing_info),
+                    proposed_project_id,
+                    proposed_workflow_id,
+                    None,
+                    record["created_at"],
+                    None,
+                ),
+            )
+        return record
+
+    def resolve_latest_clarification(self, task_id: str, status: str, response: dict[str, Any]) -> dict[str, Any]:
+        resolved_at = utc_now().isoformat()
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM clarifications WHERE task_id = ? ORDER BY created_at DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Clarification not found for task: {task_id}")
+            conn.execute(
+                "UPDATE clarifications SET status = ?, user_response_json = ?, resolved_at = ? WHERE id = ?",
+                (status, _json(response), resolved_at, row["id"]),
+            )
+            updated = conn.execute("SELECT * FROM clarifications WHERE id = ?", (row["id"],)).fetchone()
+        return self._row_to_clarification(updated)
+
+    def list_clarifications(self, task_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM clarifications WHERE task_id = ? ORDER BY created_at, id",
+                (task_id,),
+            ).fetchall()
+        return [self._row_to_clarification(row) for row in rows]
+
+    def create_tool_health_override(
+        self,
+        approval_id: str,
+        task_id: str,
+        missing_tools: list[str],
+        degraded_mode: str,
+        approved: bool,
+    ) -> dict[str, Any]:
+        created_at = utc_now().isoformat()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO tool_health_overrides (
+                  approval_id, task_id, missing_tools_json, degraded_mode, approved, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (approval_id, task_id, _json(missing_tools), degraded_mode, 1 if approved else 0, created_at),
+            )
+        return {
+            "approval_id": approval_id,
+            "task_id": task_id,
+            "missing_tools": missing_tools,
+            "degraded_mode": degraded_mode,
+            "approved": approved,
+            "created_at": created_at,
+        }
+
+    def create_scope_escalation(
+        self,
+        task_id: str,
+        reason: str,
+        changed_files: list[str],
+        source_intent: str | None,
+        status: str = "pending",
+        approval_id: str | None = None,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        record = {
+            "id": new_id("scope"),
+            "task_id": task_id,
+            "status": status,
+            "reason": reason,
+            "changed_files": changed_files,
+            "source_intent": source_intent,
+            "approval_id": approval_id,
+            "created_at": now.isoformat(),
+            "resolved_at": None,
+        }
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO scope_escalations (
+                  id, task_id, status, reason, changed_files_json, source_intent,
+                  approval_id, created_at, resolved_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record["id"],
+                    task_id,
+                    status,
+                    reason,
+                    _json(changed_files),
+                    source_intent,
+                    approval_id,
+                    record["created_at"],
+                    None,
+                ),
+            )
+        return record
+
+    def resolve_scope_escalation(self, task_id: str, status: str, approval_id: str | None = None) -> dict[str, Any] | None:
+        resolved_at = utc_now().isoformat()
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM scope_escalations WHERE task_id = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            conn.execute(
+                "UPDATE scope_escalations SET status = ?, approval_id = COALESCE(?, approval_id), resolved_at = ? WHERE id = ?",
+                (status, approval_id, resolved_at, row["id"]),
+            )
+            updated = conn.execute("SELECT * FROM scope_escalations WHERE id = ?", (row["id"],)).fetchone()
+        return self._row_to_scope_escalation(updated)
+
+    def list_scope_escalations(self, task_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM scope_escalations WHERE task_id = ? ORDER BY created_at, id",
+                (task_id,),
+            ).fetchall()
+        return [self._row_to_scope_escalation(row) for row in rows]
+
+    def create_diff_approval_record(
+        self,
+        approval_id: str,
+        task_id: str,
+        diff_hash: str,
+        changed_files_hash: str,
+        diff_artifact_id: str | None,
+    ) -> dict[str, Any]:
+        created_at = utc_now().isoformat()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO diff_approvals (
+                  approval_id, task_id, diff_hash, changed_files_hash, diff_artifact_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (approval_id, task_id, diff_hash, changed_files_hash, diff_artifact_id, created_at),
+            )
+        return {
+            "approval_id": approval_id,
+            "task_id": task_id,
+            "diff_hash": diff_hash,
+            "changed_files_hash": changed_files_hash,
+            "diff_artifact_id": diff_artifact_id,
+            "created_at": created_at,
+        }
+
+    def list_diff_approval_records(self, task_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM diff_approvals WHERE task_id = ? ORDER BY created_at, approval_id",
+                (task_id,),
+            ).fetchall()
+        return [self._row_to_diff_approval(row) for row in rows]
+
+    def create_package_output(
+        self,
+        task_id: str,
+        status: str,
+        source_paths: list[str],
+        output_paths: list[str],
+        manual_build_required: bool,
+        logs_path: str | None = None,
+    ) -> dict[str, Any]:
+        created_at = utc_now().isoformat()
+        record = {
+            "id": new_id("package"),
+            "task_id": task_id,
+            "status": status,
+            "source_paths": source_paths,
+            "output_paths": output_paths,
+            "manual_build_required": manual_build_required,
+            "logs_path": logs_path,
+            "created_at": created_at,
+        }
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO package_outputs (
+                  id, task_id, status, source_paths_json, output_paths_json,
+                  manual_build_required, logs_path, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record["id"],
+                    task_id,
+                    status,
+                    _json(source_paths),
+                    _json(output_paths),
+                    1 if manual_build_required else 0,
+                    logs_path,
+                    created_at,
+                ),
+            )
+        return record
+
+    def latest_package_output(self, task_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM package_outputs WHERE task_id = ? ORDER BY created_at DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+        return self._row_to_package_output(row) if row else None
 
     def next_correction_number(self, task_id: str) -> int:
         with self.connect() as conn:
@@ -1797,6 +2098,54 @@ class TaskStore:
             "status": row["status"],
             "created_at": row["created_at"],
             "resolved_at": row["resolved_at"],
+        }
+
+    def _row_to_clarification(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "task_id": row["task_id"],
+            "status": row["status"],
+            "missing_info": json.loads(row["missing_info_json"]),
+            "proposed_project_id": row["proposed_project_id"],
+            "proposed_workflow_id": row["proposed_workflow_id"],
+            "user_response": json.loads(row["user_response_json"]) if row["user_response_json"] else None,
+            "created_at": row["created_at"],
+            "resolved_at": row["resolved_at"],
+        }
+
+    def _row_to_scope_escalation(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "task_id": row["task_id"],
+            "status": row["status"],
+            "reason": row["reason"],
+            "changed_files": json.loads(row["changed_files_json"]),
+            "source_intent": row["source_intent"],
+            "approval_id": row["approval_id"],
+            "created_at": row["created_at"],
+            "resolved_at": row["resolved_at"],
+        }
+
+    def _row_to_diff_approval(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "approval_id": row["approval_id"],
+            "task_id": row["task_id"],
+            "diff_hash": row["diff_hash"],
+            "changed_files_hash": row["changed_files_hash"],
+            "diff_artifact_id": row["diff_artifact_id"],
+            "created_at": row["created_at"],
+        }
+
+    def _row_to_package_output(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "task_id": row["task_id"],
+            "status": row["status"],
+            "source_paths": json.loads(row["source_paths_json"]) if row["source_paths_json"] else [],
+            "output_paths": json.loads(row["output_paths_json"]) if row["output_paths_json"] else [],
+            "manual_build_required": bool(row["manual_build_required"]),
+            "logs_path": row["logs_path"],
+            "created_at": row["created_at"],
         }
 
     def _row_to_step(self, row: sqlite3.Row) -> AgentStep:

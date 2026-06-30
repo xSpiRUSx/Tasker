@@ -6,6 +6,8 @@ const STATUS_LABELS: Record<string, string> = {
   routing: "маршрутизация",
   routed: "маршрут выбран",
   awaiting_clarification: "нужно уточнение",
+  awaiting_parent_task_clarification: "нужна родительская задача",
+  awaiting_tool_health_override: "ожидает tool health",
   planning: "планирование",
   awaiting_plan_approval: "ожидает план",
   awaiting_spec_approval: "ожидает ТЗ",
@@ -21,6 +23,7 @@ const STATUS_LABELS: Record<string, string> = {
   validation_failed: "проверка не прошла",
   awaiting_diff_approval: "ожидает diff",
   awaiting_diff_reapproval: "повторное diff-ревью",
+  awaiting_scope_escalation_approval: "ожидает scope approval",
   changes_requested: "нужны правки",
   correction_requested: "запрошена правка",
   classifying_correction: "классификация правки",
@@ -48,6 +51,8 @@ const STATUS_LABELS: Record<string, string> = {
 
 const GATE_LABELS: Record<string, string> = {
   clarification: "уточнение",
+  tool_health_override: "tool health override",
+  scope_escalation: "scope escalation",
   plan: "план",
   spec: "ТЗ",
   config_change: "изменение конфигурации",

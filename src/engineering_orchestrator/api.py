@@ -32,11 +32,13 @@ from engineering_orchestrator.models import (
 )
 from engineering_orchestrator.services.approval_service import ApprovalService
 from engineering_orchestrator.services.artifact_store import ArtifactStore, slugify, slugify_short
+from engineering_orchestrator.services.commit_message_builder import CommitMessageBuilder, CommitMessageInput
 from engineering_orchestrator.services.correction_classifier import CorrectionClassifier, CorrectionClassifierInput
 from engineering_orchestrator.services.event_service import EventService
 from engineering_orchestrator.services.executor_service import ExecutorService
 from engineering_orchestrator.services.git_service import GitService
 from engineering_orchestrator.services.job_runner import JobRunner
+from engineering_orchestrator.services.package_service import ExternalProcessingPackageService
 from engineering_orchestrator.services.planning_service import PlanningService
 from engineering_orchestrator.services.project_registry import ProjectRegistry
 from engineering_orchestrator.services.review_service import ReviewService
@@ -45,10 +47,12 @@ from engineering_orchestrator.services.task_store import TaskStore, utc_now
 from engineering_orchestrator.services.tool_health import ToolHealthService
 from engineering_orchestrator.services.validation_service import ValidationService
 from engineering_orchestrator.services.workflow_registry import WorkflowRegistry
+from engineering_orchestrator.services.scope_escalation import ScopeEscalationDetector
 from engineering_orchestrator.settings import Settings, load_settings
 from engineering_orchestrator.ui import register_ui_routes
 from task_router.adaptive import AdaptiveRoutingDecision, AdaptiveRoutingService, RoutingContext
 from task_router.adaptive.config import load_adaptive_routing_config
+from engineering_orchestrator.validation.one_c_static_checks import OneCStaticChecks
 
 
 PRE_EXECUTION_GATE_ORDER = ["spec", "config_change", "migration", "security_change", "deploy_prep"]
@@ -85,6 +89,8 @@ class Orchestrator:
         model_policy_path = self._config_path(settings.model_policy_path, "model_policy.yml")
         token_budgets_path = self._config_path(settings.token_budgets_path, "token_budgets.yml")
         self.token_budgets = self._load_yaml(token_budgets_path)
+        orchestrator_config = self._load_yaml(self._config_path(None, "orchestrator.yml"))
+        self.routing_policy = orchestrator_config.get("routing_policy") or {}
         self.model_policy = ModelPolicy(model_policy_path)
         self.model_selector = ModelSelector(self.model_policy, self.projects, self.token_budgets)
         self.prompt_budgeter = PromptBudgeter(token_budgets_path)
@@ -103,6 +109,10 @@ class Orchestrator:
         self.executor_service = ExecutorService(settings, self.artifact_store.root_path)
         self.executor = self.executor_service.get(settings.default_executor)
         self.git_service = GitService()
+        self.commit_message_builder = CommitMessageBuilder()
+        self.scope_escalation_detector = ScopeEscalationDetector()
+        self.package_service = ExternalProcessingPackageService()
+        self.one_c_static_checks = OneCStaticChecks()
         self.planning_service = PlanningService(
             settings.planner_provider,
             codex_bin=settings.codex_bin,
@@ -140,7 +150,12 @@ class Orchestrator:
             self._write_index(task, "Choose the parent task before planning.")
             return self._create_response(task, None)
 
-        if route.workflow_id in {None, "clarify"}:
+        clarification_reasons = self._clarification_reasons(task)
+        if route.workflow_id in {None, "clarify"} or clarification_reasons:
+            if clarification_reasons:
+                self._request_clarification(task, clarification_reasons)
+                task = self.task_store.get_task(task.id)
+                return self._create_response(task, None)
             task.status = "awaiting_clarification"
             self.task_store.update_task(task)
             self._add_event(task, "awaiting_clarification", {"warnings": route.warnings})
@@ -149,6 +164,9 @@ class Orchestrator:
 
         self._collect_context(task)
         task = self._write_tool_health(task.id)
+        if self._requires_tool_health_override(task):
+            task = self._request_tool_health_override(task)
+            return self._create_response(task, self._pending_gate(task))
         if route.workflow_id == "question_only":
             task = self._answer_question_and_close(task.id)
             return self._create_response(task, None)
@@ -385,6 +403,89 @@ class Orchestrator:
         self.task_store.add_artifact(artifact)
         return report
 
+    def confirm_clarification(self, task_id: str, payload: dict[str, Any]) -> Task:
+        task = self.task_store.get_task(task_id)
+        project_id = payload.get("confirmed_project_id") or task.project_id
+        workflow_id = payload.get("confirmed_workflow_id") or task.workflow_id
+        project = self.projects.get(str(project_id)) if project_id else None
+        workflow = self.workflows.get(str(workflow_id)) if workflow_id else None
+        if project_id and project is None:
+            raise ValueError(f"Unknown project: {project_id}")
+        if workflow_id and workflow is None:
+            raise ValueError(f"Unknown workflow: {workflow_id}")
+
+        task.project_id = str(project_id) if project_id else task.project_id
+        task.project_name = project.get("name") if project else task.project_name
+        task.project_path = project.get("path") if project else task.project_path
+        task.workflow_id = str(workflow_id) if workflow_id else task.workflow_id
+        task.workflow_name = workflow.get("name") if workflow else task.workflow_name
+        route = dict(task.route_decision or {})
+        route["project_id"] = task.project_id
+        route["workflow_id"] = task.workflow_id
+        route["clarification_confirmed"] = True
+        route["missing_info"] = []
+        task.route_decision = route
+        task.status = "routed"
+        self.task_store.update_task(task)
+        self.task_store.resolve_latest_clarification(task.id, "confirmed", payload)
+        self._add_event(task, "clarification_confirmed", payload)
+        self._maybe_create_alias_suggestion(task, payload)
+        self._collect_context(task)
+        task = self._write_tool_health(task.id)
+        approval = self._create_plan(task)
+        if approval is None:
+            return self._advance_after_pre_execution_approval(task.id)
+        return self.task_store.get_task(task.id)
+
+    def reject_clarification(self, task_id: str, payload: dict[str, Any]) -> Task:
+        task = self.task_store.get_task(task_id)
+        self.task_store.resolve_latest_clarification(task.id, "rejected", payload)
+        task.status = "changes_requested"
+        self.task_store.update_task(task)
+        self._add_event(task, "clarification_rejected", payload)
+        self._write_index(task, "Route clarification was rejected.")
+        return self.task_store.get_task(task.id)
+
+    def select_clarification_project(self, task_id: str, payload: dict[str, Any]) -> Task:
+        payload = {
+            "confirmed_project_id": payload.get("project_id"),
+            "confirmed_workflow_id": payload.get("workflow_id"),
+            "comment": payload.get("comment"),
+        }
+        return self.confirm_clarification(task_id, payload)
+
+    def list_clarifications(self, task_id: str) -> list[dict[str, Any]]:
+        self.task_store.get_task(task_id)
+        return self.task_store.list_clarifications(task_id)
+
+    def list_scope_escalations(self, task_id: str) -> list[dict[str, Any]]:
+        self.task_store.get_task(task_id)
+        return self.task_store.list_scope_escalations(task_id)
+
+    def list_diff_approvals(self, task_id: str) -> list[dict[str, Any]]:
+        self.task_store.get_task(task_id)
+        return self.task_store.list_diff_approval_records(task_id)
+
+    def latest_package(self, task_id: str) -> dict[str, Any] | None:
+        self.task_store.get_task(task_id)
+        return self.task_store.latest_package_output(task_id)
+
+    def package_external_processing(self, task_id: str) -> dict[str, Any]:
+        task = self.task_store.get_task(task_id)
+        changed_files = self.git_service.changed_files(Path(task.worktree_path)) if task.worktree_path else []
+        artifact = self._maybe_package_external_processing(task, changed_files)
+        return {"artifact_id": artifact.id if artifact else None, "package": self.task_store.latest_package_output(task_id)}
+
+    def finalize_artifacts(self, task_id: str) -> dict[str, Any]:
+        task = self.task_store.get_task(task_id)
+        commit_hash = (task.route_decision or {}).get("commit_hash")
+        diff = self._final_diff_summary_artifact(task, str(commit_hash) if commit_hash else None)
+        final = self.artifact_store.write_markdown(task, "final_report", "Final report", self._final_report_markdown(task, str(commit_hash) if commit_hash else None))
+        self.task_store.add_artifact(diff)
+        self.task_store.add_artifact(final)
+        self._write_index(self.task_store.get_task(task.id), "Final artifacts were refreshed.")
+        return {"diff_summary_artifact_id": diff.id, "final_report_artifact_id": final.id}
+
     def _write_tool_health(self, task_id: str) -> Task:
         task = self.task_store.get_task(task_id)
         report = self.tool_health_service.task_report(task.project_id)
@@ -399,6 +500,57 @@ class Orchestrator:
         artifact = self.artifact_store.write_markdown(task, "tool_health_report", "Tool health", self.tool_health_service.markdown(report))
         self.task_store.add_artifact(artifact)
         self._add_event(task, "tool_health_checked", {"mode": report.get("mode"), "manual_review_required": report.get("manual_review_required")})
+        return self.task_store.get_task(task.id)
+
+    def _requires_tool_health_override(self, task: Task) -> bool:
+        if (task.route_decision or {}).get("tool_health_override_approved"):
+            return False
+        workflow = self.workflows.get(task.workflow_id or "") or {}
+        required = workflow.get("required_tool_health") or []
+        if not required and task.workflow_id == "1c_business_logic_change":
+            required = [{"id": "1c-graph-metadata-mcp", "required_for": ["planning", "execution"], "missing_behavior": "approval_required"}]
+        report = self.tool_health_service.task_report(task.project_id)
+        unavailable = set(report.get("unavailable_mcp") or [])
+        for item in required:
+            if item.get("missing_behavior") == "approval_required" and str(item.get("id")) in unavailable:
+                return True
+        return False
+
+    def _request_tool_health_override(self, task: Task) -> Task:
+        report = self.tool_health_service.task_report(task.project_id)
+        missing = list(report.get("unavailable_mcp") or [])
+        artifact = self.artifact_store.write_markdown(
+            task,
+            "tool_health_report",
+            "Tool health",
+            self.tool_health_service.markdown(report)
+            + "\n## Blocking issue\n\n"
+            + self._bullet_list([f"`{tool}` is unavailable." for tool in missing])
+            + "\n\n## Required decision\n\nContinue without MCP?\n",
+        )
+        self.task_store.add_artifact(artifact)
+        pending = self.task_store.get_pending_approval(task.id, "tool_health_override")
+        if pending is None:
+            pending = self.task_store.create_approval(
+                task.id,
+                "tool_health_override",
+                [artifact.id],
+                {
+                    "approves": ["continue planning/execution in degraded tool-health mode"],
+                    "missing_tools": missing,
+                    "degraded_mode": report.get("mode") or "degraded_no_mcp",
+                    "manual_review_required": True,
+                },
+            )
+            self._add_event(task, "tool_health_override_requested", {"approval_id": pending.id, "missing_tools": missing})
+        route = dict(task.route_decision or {})
+        route["planning_mode"] = report.get("mode") or "degraded_no_mcp"
+        route["manual_review_required"] = True
+        route["tool_health_gate"] = "tool_health_override"
+        task.route_decision = route
+        task.status = "awaiting_tool_health_override"
+        self.task_store.update_task(task)
+        self._write_index(self.task_store.get_task(task.id), "Pending approval gate: `tool_health_override`.")
         return self.task_store.get_task(task.id)
 
     def compact_context(self, task_id: str) -> dict[str, Any]:
@@ -559,6 +711,16 @@ class Orchestrator:
 
         if request.decision == "reject":
             self.task_store.resolve_approval(approval.id, "rejected", request.comment)
+            if gate == "scope_escalation":
+                self.task_store.resolve_scope_escalation(task_id, "rejected", approval.id)
+                correction_request = CreateCorrectionRequest(
+                    source_gate=gate,
+                    source_approval_id=approval.id,
+                    comment=request.comment or "Remove production module changes and keep the solution external-processing-only.",
+                    action="run_without_new_plan",
+                )
+                self.create_correction(task_id, correction_request, resolved_approval=approval)
+                return self.task_store.get_task(task_id)
             if gate == "diff":
                 correction_request = CreateCorrectionRequest(
                     source_gate=gate,
@@ -582,6 +744,29 @@ class Orchestrator:
             return self._run_correction_execution(task_id, correction)
         if gate == "plan" or gate in PRE_EXECUTION_GATE_ORDER:
             return self._advance_after_pre_execution_approval(task_id)
+        if gate == "tool_health_override":
+            self.task_store.create_tool_health_override(
+                approval.id,
+                task_id,
+                list(approval.requested_payload.get("missing_tools") or []),
+                str(approval.requested_payload.get("degraded_mode") or "degraded_no_mcp"),
+                True,
+            )
+            task = self.task_store.get_task(task_id)
+            route = dict(task.route_decision or {})
+            route["tool_health_override_approved"] = True
+            route["planning_mode"] = route.get("planning_mode") or "degraded_no_mcp"
+            route["manual_review_required"] = True
+            task.route_decision = route
+            self.task_store.update_task(task)
+            approval = self._create_plan(task)
+            if approval is None:
+                return self._advance_after_pre_execution_approval(task_id)
+            return self.task_store.get_task(task_id)
+        if gate == "scope_escalation":
+            self.task_store.resolve_scope_escalation(task_id, "approved", approval.id)
+            task = self.task_store.get_task(task_id)
+            return self._request_current_diff_approval(task, approval.requested_payload)
         if gate == "diff":
             if correction_id:
                 self.task_store.update_correction_request_status(str(correction_id), "diff_approved")
@@ -780,8 +965,81 @@ class Orchestrator:
                 self.task_store.increment_routing_rule_hit(rule_id)
         return decision
 
+    def _clarification_reasons(self, task: Task) -> list[str]:
+        route = task.route_decision or {}
+        if route.get("clarification_confirmed"):
+            return []
+        thresholds = self.routing_policy.get("confidence_thresholds") or {}
+        project_threshold = float(thresholds.get("project_accept", thresholds.get("clarification_below", 0.75)))
+        workflow_threshold = float(thresholds.get("workflow_accept", thresholds.get("clarification_below", 0.75)))
+        reasons: list[str] = []
+        project_confidence = route.get("project_confidence")
+        workflow_confidence = route.get("workflow_confidence")
+        if project_confidence is not None and float(project_confidence) < project_threshold:
+            reasons.append(f"Project confidence `{float(project_confidence):.2f}` is below `{project_threshold:.2f}`.")
+        if workflow_confidence is not None and 0 < float(workflow_confidence) < workflow_threshold:
+            reasons.append(f"Workflow confidence `{float(workflow_confidence):.2f}` is below `{workflow_threshold:.2f}`.")
+        missing_info = [str(item) for item in route.get("missing_info") or []]
+        if missing_info and task.workflow_id not in set(self.routing_policy.get("allow_continue_with_missing_info_for") or ["question_only"]):
+            reasons.extend(missing_info)
+        return reasons
+
+    def _request_clarification(self, task: Task, reasons: list[str]) -> None:
+        task.status = "awaiting_clarification"
+        self.task_store.update_task(task)
+        record = self.task_store.create_clarification(task.id, reasons, task.project_id, task.workflow_id)
+        content = f"""# Clarification required
+
+Tasker is not confident enough to continue planning or execution.
+
+## What needs confirmation
+
+{self._bullet_list(reasons)}
+
+## Proposed route
+
+- Project: `{task.project_id or "unknown"}`
+- Workflow: `{task.workflow_id or "unknown"}`
+
+## Actions
+
+- Confirm proposed route
+- Select another project/workflow
+- Edit request
+- Cancel task
+"""
+        artifact = self.artifact_store.write_markdown(task, "clarification_request", "Clarification required", content)
+        self.task_store.add_artifact(artifact)
+        self._add_event(task, "awaiting_clarification", {"clarification_id": record["id"], "reasons": reasons})
+        self._write_index(self.task_store.get_task(task.id), "Clarification is required before planning.")
+
+    def _maybe_create_alias_suggestion(self, task: Task, payload: dict[str, Any]) -> None:
+        alias = payload.get("alias")
+        project_id = payload.get("confirmed_project_id")
+        if not alias or not project_id:
+            return
+        self.task_store.create_routing_rule(
+            {
+                "rule_type": "project_alias",
+                "pattern_type": "contains",
+                "pattern": str(alias).strip().lower(),
+                "target_route_type": "project_task",
+                "target_project_id": str(project_id),
+                "target_workflow_id": task.workflow_id,
+                "confidence": 0.95,
+                "priority": 10,
+                "status": "pending",
+                "source": "clarification",
+                "source_task_id": task.id,
+                "source_message": task.user_message,
+                "positive_examples": [task.user_message],
+            }
+        )
+
     def _should_use_adaptive_for_task(self, decision: AdaptiveRoutingDecision) -> bool:
         if decision.requires_clarification and decision.parent_task_candidates:
+            return True
+        if decision.route_type == "project_task" and decision.project_id:
             return True
         if decision.route_type in {"linked_correction", "question", "task_action"} and (
             decision.parent_task_id or decision.parent_task_candidates
@@ -863,7 +1121,36 @@ class Orchestrator:
                 requires_spec=False,
             )
 
+        if decision.route_type == "project_task" and decision.project_id:
+            return self._route_project_task_from_adaptive(task, decision)
+
         return self._mock_route_task(task)
+
+    def _route_project_task_from_adaptive(self, task: Task, decision: AdaptiveRoutingDecision) -> RouteDecision:
+        project = self.projects.get(decision.project_id or "")
+        intent, task_kind, complexity = self._classify(task.user_message)
+        if decision.task_kind:
+            task_kind = decision.task_kind
+        workflow = self.workflows.get(decision.workflow_id or "") if decision.workflow_id else None
+        if workflow is None:
+            workflow = self.workflows.select(intent, task_kind, complexity)
+        return RouteDecision(
+            normalized_task=task.user_message.strip(),
+            intent=intent,
+            task_kind=task_kind,
+            complexity=complexity,
+            project_id=(project or {}).get("id") or decision.project_id,
+            project_name=(project or {}).get("name"),
+            project_path=(project or {}).get("path"),
+            workflow_id=(workflow or {}).get("id"),
+            workflow_name=(workflow or {}).get("name"),
+            risk_level="medium",
+            risk_flags=["adaptive_routing"],
+            approval_gates=(workflow or {}).get("approval_gates", []),
+            warnings=[],
+            rationale=decision.reason,
+            requires_spec=bool((workflow or {}).get("requires_spec", False)),
+        )
 
     def _get_parent_from_adaptive(self, decision: AdaptiveRoutingDecision) -> Task | None:
         if not decision.parent_task_id:
@@ -1293,17 +1580,24 @@ class Orchestrator:
         if not records:
             return
         lines = ["# Model decisions", ""]
+        by_operation: dict[str, list[Any]] = {}
         for record in records:
+            by_operation.setdefault(record.operation, []).append(record)
+        for operation, operation_records in by_operation.items():
+            record = operation_records[-1]
             lines.extend(
                 [
-                    f"## {record.operation}",
+                    f"## {operation}",
                     "",
+                    "Latest:",
                     f"- Selected target: `{record.selected_target}`",
                     f"- Runtime: `{record.runtime}`",
                     f"- Model: `{record.model}`",
                     f"- Reasoning effort: `{record.reasoning_effort or 'none'}`",
                     f"- Reason: {record.reason}",
                     f"- Prompt budget chars: `{record.max_prompt_chars}`",
+                    f"- Attempts: `{len(operation_records)}`",
+                    "- History: see `02-model-decisions.json`",
                     "",
                 ]
             )
@@ -2109,11 +2403,24 @@ Awaiting updated diff approval.
         task.status = "validating_correction" if is_correction else "validating"
         self.task_store.update_task(task)
         validation_result = self._run_validation(task)
+        static_markdown = ""
+        if self.projects.validation_profile(task.project_id) == "1c":
+            static_changed_files: list[str] = []
+            if task.worktree_path:
+                try:
+                    static_changed_files = self.git_service.changed_files(Path(task.worktree_path))
+                except Exception:
+                    static_changed_files = []
+            static_result = self.one_c_static_checks.run(task.worktree_path, static_changed_files, task.user_message)
+            static_markdown = "\n" + self.one_c_static_checks.markdown(static_result)
+            if static_result.failed:
+                validation_result.status = "failed"
+                validation_result.summary = validation_result.summary.rstrip() + " 1C static checks failed."
         validation = self.artifact_store.write_markdown(
             task,
             "validation_report",
             "Validation report",
-            self.validation_service.markdown_report(validation_result),
+            self.validation_service.markdown_report(validation_result) + static_markdown,
         )
         self.task_store.add_artifact(validation)
         self._write_validation_command_outputs(task, validation_result)
@@ -2122,7 +2429,7 @@ Awaiting updated diff approval.
             run.id,
             2,
             "validate",
-            "passed" if validation_result.status in {"passed", "skipped"} else "failed",
+            self._validation_step_status(validation_result),
             output_summary=validation_result.summary,
             artifact_ids=[validation.id],
         )
@@ -2216,7 +2523,7 @@ Awaiting updated diff approval.
         policy_artifact = self.artifact_store.write_markdown(task, "policy_report", "Policy report", policy_markdown)
         self.task_store.add_artifact(policy_artifact)
         self._add_event(task, "policy_checked", {"status": policy_status})
-        if not loop_evaluation.passed:
+        if not loop_evaluation.passed and loop_evaluation.status != "manual_review_required":
             if loop_evaluation.status == "repairable":
                 repair = self.artifact_store.write_markdown(
                     task,
@@ -2265,22 +2572,49 @@ Awaiting updated diff approval.
         )
         self.task_store.add_artifact(review)
         self.task_store.add_artifact(diff_summary)
-        self.task_store.finish_run(run.id, "passed", iteration_count=1, stop_reason="evaluation_passed")
+        package_artifact = self._maybe_package_external_processing(task, result.changed_files)
+        run_status = "manual_review_required" if loop_evaluation.status == "manual_review_required" else "passed"
+        stop_reason = "manual_review_required" if loop_evaluation.status == "manual_review_required" else "evaluation_passed"
+        self.task_store.finish_run(run.id, run_status, iteration_count=1, stop_reason=stop_reason)
         self._write_run_artifacts(task, run.id)
 
         approval_artifacts = [validation.id, eval_artifact.id, policy_artifact.id, review.id, diff_summary.id]
+        if package_artifact is not None:
+            approval_artifacts.append(package_artifact.id)
         if diff_patch is not None:
             approval_artifacts.append(diff_patch.id)
 
         reviewed_files = list(result.changed_files)
+        canonical_diff = diff_text
+        if task.worktree_path:
+            try:
+                canonical_diff = self.git_service.canonical_diff(Path(task.worktree_path))
+            except Exception:
+                canonical_diff = diff_text
         diff_payload = {
             "approves": ["commit gate", "close task"],
             "reviewed_files": reviewed_files,
-            "approved_diff_hash": self._text_hash(diff_text),
+            "approved_diff_hash": self._text_hash(canonical_diff),
             "approved_changed_files_hash": self._json_hash(sorted(reviewed_files)),
             "approved_diff_stat_hash": self._text_hash(diff_stat),
             "approved_diff_artifact_id": diff_patch.id if diff_patch is not None else None,
         }
+        scope_result = self.scope_escalation_detector.detect(
+            task.user_message,
+            task.workflow_id,
+            reviewed_files,
+            task.route_decision,
+        )
+        if scope_result.scope_escalated and not self._scope_escalation_approved(task.id):
+            approval = self._request_scope_escalation(
+                task,
+                scope_result.reason or "Scope escalation detected.",
+                scope_result.changed_files,
+                approval_artifacts,
+                diff_payload,
+            )
+            self._write_index(self.task_store.get_task(task.id), "Pending approval gate: `scope_escalation`.")
+            return self.task_store.get_task(task.id)
         if not self.settings.require_diff_approval:
             self._add_event(task, "diff_approval_skipped", {"artifact_ids": approval_artifacts})
             self._write_index(self.task_store.get_task(task.id), "Diff approval is disabled by policy.")
@@ -2300,6 +2634,13 @@ Awaiting updated diff approval.
             self.task_store.update_correction_request_status(correction.id, "awaiting_correction_diff_approval")
 
         approval = self.task_store.create_approval(task.id, "diff", approval_artifacts, diff_payload)
+        self.task_store.create_diff_approval_record(
+            approval.id,
+            task.id,
+            str(diff_payload.get("approved_diff_hash") or ""),
+            str(diff_payload.get("approved_changed_files_hash") or ""),
+            diff_payload.get("approved_diff_artifact_id"),
+        )
         task.status = "awaiting_correction_diff_approval" if is_correction else "awaiting_diff_approval"
         self.task_store.update_task(task)
         self._add_event(
@@ -2523,6 +2864,48 @@ Status: `{result.status}`
             )
             self.task_store.add_artifact(artifact)
 
+    def _validation_step_status(self, validation_result) -> str:
+        if validation_result.status == "passed":
+            return "passed"
+        if validation_result.status == "skipped" and getattr(validation_result, "manual_review_required", False):
+            return "manual_review_required"
+        return "skipped" if validation_result.status == "skipped" else "failed"
+
+    def _maybe_package_external_processing(self, task: Task, changed_files: list[str]):
+        route = task.route_decision or {}
+        task_kind = str(route.get("task_kind") or "")
+        if task.workflow_id not in {"simple_external_development", "1c_external_processing"} and task_kind not in {
+            "external_report_or_processing",
+            "1c_external_processing",
+        }:
+            return None
+        project = self.projects.get(task.project_id or "") or {}
+        result = self.package_service.package(task.id, project, task.worktree_path, changed_files)
+        if result.status == "skipped" and not result.source_paths:
+            return None
+        artifact = self.artifact_store.write_markdown(
+            task,
+            "package_output",
+            "External processing package",
+            self.package_service.markdown(result),
+        )
+        self.task_store.add_artifact(artifact)
+        self.task_store.create_package_output(
+            task.id,
+            result.status,
+            result.source_paths,
+            result.output_paths,
+            result.manual_build_required,
+            None,
+        )
+        route = dict(task.route_decision or {})
+        route["package_status"] = result.status
+        route["manual_build_required"] = result.manual_build_required
+        task.route_decision = route
+        self.task_store.update_task(task)
+        self._add_event(task, "package_external_processing_completed", {"status": result.status, "manual_build_required": result.manual_build_required})
+        return artifact
+
     def _evaluate_policy(
         self,
         task: Task,
@@ -2700,7 +3083,9 @@ Status: `{result.status}`
             and validation_result.status == "skipped"
             and getattr(validation_result, "manual_review_required", False)
         ):
-            recommendation = "manual_review_required" if evaluation.passed else "request changes"
+            recommendation = "manual_review_required" if evaluation.status == "manual_review_required" else (
+                "manual_review_required" if evaluation.passed else "request changes"
+            )
         validation_lines = [
             f"- `{command.command}`: `{command.status}`"
             for command in getattr(validation_result, "commands", [])
@@ -2803,15 +3188,20 @@ Status: `{result.status}`
             "Commit result",
             f"# Commit result\n\n{commit_summary}\n",
         )
+        diff_summary = self._final_diff_summary_artifact(task, commit_hash)
         final = self.artifact_store.write_markdown(
             task,
             "final_report",
             "Final report",
-            f"# Final report\n\nTask closed after commit gate.\n\nCommit: `{commit_hash or 'none'}`\n",
+            self._final_report_markdown(task, commit_hash),
         )
         self.task_store.add_artifact(commit)
+        self.task_store.add_artifact(diff_summary)
         self.task_store.add_artifact(final)
         if task.status != "failed":
+            route = dict(task.route_decision or {})
+            route["commit_hash"] = commit_hash
+            task.route_decision = route
             task.status = "closed"
             task.closed_at = utc_now()
             self.task_store.update_task(task)
@@ -2821,6 +3211,87 @@ Status: `{result.status}`
             self._write_index(self.task_store.get_task(task.id), "Commit failed.")
         return self.task_store.get_task(task.id)
 
+    def _final_diff_summary_artifact(self, task: Task, commit_hash: str | None):
+        changed_files: list[str] = []
+        diff_stat = "No source files were modified."
+        if task.worktree_path:
+            try:
+                changed_files = self.git_service.changed_files(Path(task.worktree_path))
+                diff_stat = self.git_service.diff_stat(Path(task.worktree_path)).strip() or diff_stat
+            except Exception as exc:
+                diff_stat = f"Could not collect final git diff: {exc}"
+        approval = self._approved_diff_approval(task.id)
+        payload = approval.requested_payload if approval else {}
+        content = f"""# Diff summary
+
+Status: committed
+
+## Changed files
+
+{self._bullet_list(changed_files or list(payload.get("reviewed_files") or []))}
+
+## Diff stat
+
+```text
+{diff_stat}
+```
+
+## Approved diff
+
+- Approval ID: `{approval.id if approval else 'none'}`
+- Approved at: `{approval.resolved_at.isoformat() if approval and approval.resolved_at else 'none'}`
+- Diff hash: `{payload.get('approved_diff_hash') or 'none'}`
+
+## Commit
+
+- Commit hash: `{commit_hash or 'none'}`
+"""
+        return self.artifact_store.write_markdown(task, "diff_summary", "Diff summary", content)
+
+    def _final_report_markdown(self, task: Task, commit_hash: str | None) -> str:
+        route = task.route_decision or {}
+        evaluations = self.task_store.list_evaluations(task.id)
+        package = self.task_store.latest_package_output(task.id)
+        scope = self.task_store.list_scope_escalations(task.id)
+        return f"""# Final report
+
+Task status: `closed`
+Project: `{task.project_id or 'unknown'}`
+Workflow: `{task.workflow_id or 'unknown'}`
+
+## Model decisions
+
+- Total decisions: `{len(self.task_store.list_model_decisions(task.id))}`
+- Details: `02-model-decisions.md`
+
+## Tool health
+
+- Mode: `{route.get('planning_mode') or 'ok'}`
+- Manual review required: `{'yes' if route.get('manual_review_required') else 'no'}`
+
+## Validation
+
+- Status: `{evaluations[-1].status if evaluations else 'not recorded'}`
+- Manual review status: `{'required' if evaluations and evaluations[-1].status == 'manual_review_required' else 'not required'}`
+
+## Scope escalation approvals
+
+{self._bullet_list([f"{item['status']}: {item['reason']}" for item in scope] or ['None.'])}
+
+## Package
+
+- Status: `{package.get('status') if package else 'not applicable'}`
+- Manual build required: `{'yes' if package and package.get('manual_build_required') else 'no'}`
+
+## Commit
+
+- Commit hash: `{commit_hash or 'none'}`
+
+## Next steps
+
+{self._bullet_list(['Manual 1C review is required.' if evaluations and evaluations[-1].status == 'manual_review_required' else 'No automated next steps.'])}
+"""
+
     def _request_diff_reapproval(self, task: Task, reason: str) -> Task:
         task.status = "awaiting_diff_reapproval"
         self.task_store.update_task(task)
@@ -2828,6 +3299,7 @@ Status: `{result.status}`
 
         changed_files: list[str] = []
         diff_text = ""
+        canonical_diff = ""
         diff_stat = "No source files were modified."
         diff_patch = None
         if task.worktree_path:
@@ -2836,6 +3308,7 @@ Status: `{result.status}`
                 self.git_service.diff_check(worktree)
                 changed_files = self.git_service.changed_files(worktree)
                 diff_text = self.git_service.diff_patch(worktree)
+                canonical_diff = self.git_service.canonical_diff(worktree)
                 diff_stat = self.git_service.diff_stat(worktree).strip() or diff_stat
                 if diff_text.strip():
                     diff_patch = self.artifact_store.write_markdown(
@@ -2856,9 +3329,17 @@ Status: `{result.status}`
             "Commit result",
             f"# Commit result\n\nCommit blocked: {reason}\n\nA fresh diff approval has been requested.\n",
         )
+        reapproval_version = 1 + max(
+            [
+                artifact.version or 0
+                for artifact in self.task_store.list_artifacts(task.id)
+                if artifact.kind == "diff_reapproval"
+            ],
+            default=0,
+        )
         diff_summary = self.artifact_store.write_markdown(
             task,
-            "diff_summary",
+            "diff_reapproval",
             "Diff reapproval",
             "# Diff reapproval\n\n"
             f"Commit blocked: `{reason}`\n\n"
@@ -2866,6 +3347,7 @@ Status: `{result.status}`
             f"{self._bullet_list(changed_files)}\n\n"
             "## Diff stat\n\n"
             f"```text\n{diff_stat}\n```",
+            version=reapproval_version,
         )
         self.task_store.add_artifact(blocked)
         self.task_store.add_artifact(diff_summary)
@@ -2882,40 +3364,116 @@ Status: `{result.status}`
                 {
                     "approves": ["commit gate", "close task"],
                     "reviewed_files": changed_files,
-                    "approved_diff_hash": self._text_hash(diff_text),
+                    "approved_diff_hash": self._text_hash(canonical_diff or diff_text),
                     "approved_changed_files_hash": self._json_hash(sorted(changed_files)),
                     "approved_diff_stat_hash": self._text_hash(diff_stat),
                     "approved_diff_artifact_id": diff_patch.id if diff_patch is not None else None,
                     "reapproval_reason": reason,
                 },
             )
+            self.task_store.create_diff_approval_record(
+                pending.id,
+                task.id,
+                str(pending.requested_payload.get("approved_diff_hash") or ""),
+                str(pending.requested_payload.get("approved_changed_files_hash") or ""),
+                pending.requested_payload.get("approved_diff_artifact_id"),
+            )
             self._add_event(task, "diff_reapproval_requested", {"approval_id": pending.id, "reason": reason})
 
         self._write_index(self.task_store.get_task(task.id), "Commit blocked; pending fresh diff approval.")
         return self.task_store.get_task(task.id)
 
+    def _scope_escalation_approved(self, task_id: str) -> bool:
+        return any(approval.gate == "scope_escalation" and approval.status == "approved" for approval in self.task_store.list_approvals(task_id))
+
+    def _request_scope_escalation(
+        self,
+        task: Task,
+        reason: str,
+        changed_files: list[str],
+        artifact_ids: list[str],
+        diff_payload: dict[str, Any],
+    ):
+        content = f"""# Scope escalation
+
+{reason}
+
+## Changed production files
+
+{self._bullet_list(changed_files)}
+
+## Required approval
+
+Approve production module change?
+"""
+        artifact = self.artifact_store.write_markdown(task, "scope_escalation", "Scope escalation", content)
+        self.task_store.add_artifact(artifact)
+        record = self.task_store.create_scope_escalation(task.id, reason, changed_files, str((task.route_decision or {}).get("intent") or "unknown"))
+        pending = self.task_store.create_approval(
+            task.id,
+            "scope_escalation",
+            [*artifact_ids, artifact.id],
+            {
+                "approves": ["production/common module changes outside the original external-processing scope"],
+                "scope_escalation_id": record["id"],
+                "reason": reason,
+                "changed_files": changed_files,
+                "diff_payload": diff_payload,
+                "diff_artifact_ids": artifact_ids,
+            },
+        )
+        task.status = "awaiting_scope_escalation_approval"
+        self.task_store.update_task(task)
+        self._add_event(task, "scope_escalation_requested", {"approval_id": pending.id, "changed_files": changed_files})
+        return pending
+
+    def _request_current_diff_approval(self, task: Task, payload: dict[str, Any]) -> Task:
+        diff_payload = dict(payload.get("diff_payload") or {})
+        artifact_ids = list(payload.get("diff_artifact_ids") or [])
+        if not diff_payload:
+            changed_files = self.git_service.changed_files(Path(task.worktree_path)) if task.worktree_path else []
+            canonical_diff = self.git_service.canonical_diff(Path(task.worktree_path)) if task.worktree_path else ""
+            diff_payload = {
+                "approves": ["commit gate", "close task"],
+                "reviewed_files": changed_files,
+                "approved_diff_hash": self._text_hash(canonical_diff),
+                "approved_changed_files_hash": self._json_hash(sorted(changed_files)),
+                "approved_diff_artifact_id": None,
+            }
+        approval = self.task_store.create_approval(task.id, "diff", artifact_ids, diff_payload)
+        self.task_store.create_diff_approval_record(
+            approval.id,
+            task.id,
+            str(diff_payload.get("approved_diff_hash") or ""),
+            str(diff_payload.get("approved_changed_files_hash") or ""),
+            diff_payload.get("approved_diff_artifact_id"),
+        )
+        task.status = "awaiting_diff_approval"
+        self.task_store.update_task(task)
+        self._add_event(task, "diff_approval_requested", {"approval_id": approval.id, "after_gate": "scope_escalation"})
+        self._write_index(self.task_store.get_task(task.id), "Pending approval gate: `diff`.")
+        return self.task_store.get_task(task.id)
+
     def _commit_message(self, task: Task) -> str:
         route = task.route_decision or {}
-        task_kind = str(route.get("task_kind") or "task")
-        commit_type = "fix" if task_kind in {"bugfix", "code_patch", "linked_correction"} else "chore"
-        scope = slugify(task.project_id or "tasker", fallback="tasker").replace("-", "_")
-        summary = slugify(task.user_message, fallback="task").replace("-", " ")[:72].strip()
         changed_files = self._latest_reviewed_files(task.id)
-        bullets = changed_files[:5] or ["Prepared reviewed task changes."]
         evaluations = self.task_store.list_evaluations(task.id)
         validation_status = evaluations[-1].status if evaluations else "not recorded"
-        body = "\n".join(f"- {item}" for item in bullets)
-        return (
-            f"{commit_type}({scope}): {summary}\n\n"
-            f"Task: {task.id}\n\n"
-            f"{body}\n\n"
-            "Validation:\n"
-            f"- {validation_status}"
+        return self.commit_message_builder.build(
+            CommitMessageInput(
+                task_id=task.id,
+                project_id=task.project_id,
+                workflow_id=task.workflow_id,
+                task_kind=str(route.get("task_kind") or "task"),
+                normalized_task=str(route.get("normalized_task") or task.user_message),
+                changed_files=changed_files,
+                validation_status=validation_status,
+            )
         )
 
     def _latest_evaluation_passed(self, task_id: str) -> bool:
         evaluations = self.task_store.list_evaluations(task_id)
-        return bool(evaluations and evaluations[-1].passed)
+        return bool(evaluations and (evaluations[-1].passed or evaluations[-1].status == "manual_review_required"))
 
     def _approved_diff_approval(self, task_id: str):
         approvals = [approval for approval in self.task_store.list_approvals(task_id) if approval.gate == "diff" and approval.status == "approved"]
@@ -2939,8 +3497,7 @@ Status: `{result.status}`
         try:
             self.git_service.diff_check(worktree)
             current_files = self.git_service.changed_files(worktree)
-            current_diff = self.git_service.diff_patch(worktree)
-            current_diff_stat = self.git_service.diff_stat(worktree).strip()
+            current_diff = self.git_service.canonical_diff(worktree)
         except Exception as exc:
             return f"git pre-commit observe failed: {exc}"
         approval = self._approved_diff_approval(task.id)
@@ -2951,8 +3508,6 @@ Status: `{result.status}`
             return "changed files differ from approved diff"
         if payload.get("approved_diff_hash") and payload["approved_diff_hash"] != self._text_hash(current_diff):
             return "diff content differs from approved diff"
-        if payload.get("approved_diff_stat_hash") and payload["approved_diff_stat_hash"] != self._text_hash(current_diff_stat):
-            return "diff stat differs from approved diff"
         return None
 
     def _text_hash(self, value: str) -> str:
@@ -3367,6 +3922,59 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @app.get("/tasks/{task_id}/clarifications")
+    def list_clarifications(task_id: str):
+        try:
+            return {"items": orchestrator.list_clarifications(task_id)}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/tasks/{task_id}/clarifications/confirm")
+    def confirm_clarification(task_id: str, payload: dict[str, Any]):
+        try:
+            return orchestrator.confirm_clarification(task_id, payload)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/tasks/{task_id}/clarifications/reject")
+    def reject_clarification(task_id: str, payload: dict[str, Any]):
+        try:
+            return orchestrator.reject_clarification(task_id, payload)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/tasks/{task_id}/clarifications/select-project")
+    def select_clarification_project(task_id: str, payload: dict[str, Any]):
+        try:
+            return orchestrator.select_clarification_project(task_id, payload)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/tasks/{task_id}/scope-escalations")
+    def list_scope_escalations(task_id: str):
+        try:
+            return {"items": orchestrator.list_scope_escalations(task_id)}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/tasks/{task_id}/diff-approvals")
+    def list_diff_approvals(task_id: str):
+        try:
+            return {"items": orchestrator.list_diff_approvals(task_id)}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/tasks/{task_id}/package")
+    def latest_package(task_id: str):
+        try:
+            return orchestrator.latest_package(task_id) or {}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.get("/tasks/{task_id}/model-decisions")
     def list_model_decisions(task_id: str):
         try:
@@ -3459,6 +4067,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             orchestrator.task_store.update_task(task)
             orchestrator._add_event(task, "validation_skipped_manual", {})
             return orchestrator.get_task_payload(task_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/tasks/{task_id}/actions/package-external-processing", status_code=status.HTTP_202_ACCEPTED)
+    def package_external_processing_action(task_id: str):
+        try:
+            orchestrator.get_task(task_id)
+            job = orchestrator.job_runner.enqueue(
+                task_id,
+                "package-external-processing",
+                lambda: orchestrator.package_external_processing(task_id),
+                input={},
+            )
+            return JobAcceptedResponse(job_id=job.id, task_id=task_id, status=job.status, action=job.action)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/tasks/{task_id}/actions/finalize-artifacts", status_code=status.HTTP_202_ACCEPTED)
+    def finalize_artifacts_action(task_id: str):
+        try:
+            orchestrator.get_task(task_id)
+            job = orchestrator.job_runner.enqueue(
+                task_id,
+                "finalize-artifacts",
+                lambda: orchestrator.finalize_artifacts(task_id),
+                input={},
+            )
+            return JobAcceptedResponse(job_id=job.id, task_id=task_id, status=job.status, action=job.action)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

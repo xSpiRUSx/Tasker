@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import subprocess
 from pathlib import Path
 
@@ -76,7 +77,15 @@ class GitService:
 
     def diff_patch(self, worktree_path: Path) -> str:
         self._mark_untracked_for_diff(worktree_path)
-        return self._git(worktree_path, ["diff", "HEAD"])
+        return self._git(worktree_path, ["diff", "--no-ext-diff", "HEAD"])
+
+    def canonical_diff(self, worktree_path: Path | str) -> str:
+        path = Path(worktree_path)
+        self._mark_untracked_for_diff(path)
+        return self._git(path, ["diff", "--binary", "--no-ext-diff", "HEAD"])
+
+    def diff_hash(self, worktree_path: Path | str) -> str:
+        return hashlib.sha256(self.canonical_diff(worktree_path).encode("utf-8", "replace")).hexdigest()
 
     def commit(self, worktree_path: Path, message: str) -> str:
         self.diff_check(worktree_path)

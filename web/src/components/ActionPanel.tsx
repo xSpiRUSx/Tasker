@@ -1,4 +1,4 @@
-import { Hammer, RefreshCcw, ShieldCheck, Wrench } from "lucide-react";
+import { Archive, Hammer, Package, RefreshCcw, ShieldCheck, Wrench } from "lucide-react";
 import { repairTaskState, runTaskAction } from "../api/client";
 import type { Task } from "../api/types";
 
@@ -67,6 +67,21 @@ function actionsForStatus(status: string) {
       { id: "retry-validation", label: "Повторить проверку", icon: <RefreshCcw size={16} /> },
       { id: "skip-validation-manual", label: "Ручная проверка", icon: <ShieldCheck size={16} /> },
     ];
+  }
+  if (status === "awaiting_clarification") {
+    return [{ id: "rebuild-context", label: "Обновить контекст", icon: <RefreshCcw size={16} /> }];
+  }
+  if (status === "awaiting_tool_health_override" || status === "awaiting_scope_escalation_approval") {
+    return [{ id: "rebuild-context", label: "Обновить контекст", icon: <RefreshCcw size={16} /> }];
+  }
+  if (status === "awaiting_diff_approval" || status === "awaiting_diff_reapproval") {
+    return [
+      { id: "package-external-processing", label: "Package output", icon: <Package size={16} /> },
+      { id: "rebuild-context", label: "Обновить контекст", icon: <RefreshCcw size={16} /> },
+    ];
+  }
+  if (status === "closed") {
+    return [{ id: "finalize-artifacts", label: "Refresh final artifacts", icon: <Archive size={16} /> }];
   }
   if (status === "changes_requested" || status === "correction_blocked") {
     return [

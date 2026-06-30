@@ -21,6 +21,30 @@ router:
   projects_path: "./config/projects.yml"
   workflows_path: "./config/workflows.yml"
 
+routing_policy:
+  confidence_thresholds:
+    project_accept: 0.75
+    workflow_accept: 0.75
+    clarification_below: 0.75
+  block_on_missing_info:
+    enabled: true
+    categories:
+      - project_confirmation
+      - output_format
+      - external_document_unavailable
+      - ambiguous_workflow
+  allow_continue_with_missing_info_for:
+    - question_only
+
+one_c_static_checks:
+  enabled: true
+  external_processing:
+    xml_parse: true
+    command_handler_presence: true
+    no_send_side_effects_for_testing_tools: true
+  production_module_change:
+    requires_scope_gate: true
+
 planning:
   provider: "codex-cli"
   model: null

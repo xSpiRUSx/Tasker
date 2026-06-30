@@ -29,9 +29,12 @@ class Evaluator:
         approved_gates: set[str] | None = None,
     ) -> LoopEvaluation:
         file_findings = FilePolicy(project, workflow).evaluate(observation.changed_files, approved_gates)
+        validation_status = observation.validation_result.status
+        if validation_status == "skipped" and getattr(observation.validation_result, "manual_review_required", False):
+            validation_status = "manual_review_required"
         passed, status, findings = self.evaluation_policy.evaluate(
             executor_status=observation.executor_result.status,
-            validation_status=observation.validation_result.status,
+            validation_status=validation_status,
             changed_files=observation.changed_files,
             diff_text=observation.diff_patch,
             file_findings=file_findings,

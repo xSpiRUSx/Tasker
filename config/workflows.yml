@@ -43,6 +43,13 @@ workflows:
       - investigation
     complexity: ["medium", "complex", "epic"]
     required_tools: ["codex"]
+    required_tool_health:
+      - id: 1c-graph-metadata-mcp
+        required_for: ["planning", "execution"]
+        missing_behavior: approval_required
+      - id: 1c-validator
+        required_for: ["validation"]
+        missing_behavior: manual_review_required
     requires_spec: true
     requires_tests: true
     requires_review: true
@@ -63,6 +70,7 @@ workflows:
       - Inspect affected metadata, modules, registers, queues, and exchange paths.
       - Design a phased implementation plan with business-risk notes.
       - Implement the approved minimal core change.
+      - Package external processing output when requested.
       - Validate with configured 1C checks or mark manual review required.
       - Review diff and prepare a focused correction iteration if needed.
 
@@ -146,6 +154,7 @@ workflows:
     approval_gates: ["plan", "diff", "commit"]
     blocked_change_types: ["configuration_change", "dependency_change", "migration", "deployment_change", "security_change", "architecture_change"]
     steps:
+      - package_external_processing
       - Понять, нужен внешний отчет, внешняя обработка, фрагмент кода или запрос.
       - Не изменять конфигурацию выбранного проекта.
       - Подготовить решение в виде внешнего артефакта или текста ответа.

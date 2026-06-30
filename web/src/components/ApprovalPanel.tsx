@@ -13,7 +13,17 @@ interface ApprovalPanelProps {
   taskId: string;
 }
 
-const DANGEROUS_GATES = new Set(["diff", "commit", "config_change", "migration", "security_change", "deploy", "deploy_prep"]);
+const DANGEROUS_GATES = new Set([
+  "diff",
+  "commit",
+  "config_change",
+  "migration",
+  "security_change",
+  "deploy",
+  "deploy_prep",
+  "tool_health_override",
+  "scope_escalation",
+]);
 
 export function ApprovalPanel({ approvals, busy, onRefresh, setError, setToast, taskId }: ApprovalPanelProps) {
   const [comment, setComment] = useState("");

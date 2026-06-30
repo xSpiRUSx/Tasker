@@ -54,6 +54,7 @@ export function TaskDetail({ approvals, busy, onCancel, onCorrection, onRefresh,
     routeDecision.manual_review_required === true ||
     routeDecision.planning_mode === "degraded_no_mcp" ||
     routeDecision.validation_warning === "manual_review_required";
+  const packageStatus = routeDecision.package_status ? String(routeDecision.package_status) : null;
 
   return (
     <main className="main">
@@ -99,6 +100,17 @@ export function TaskDetail({ approvals, busy, onCancel, onCorrection, onRefresh,
             ) : null}
             {manualReviewRequired ? (
               <p className="task-header__warning">1C-проверка пропущена. Нужна ручная проверка.</p>
+            ) : null}
+            {selectedTask.status === "awaiting_tool_health_override" ? (
+              <p className="task-header__warning">MCP/validator недоступен. Нужно явно подтвердить degraded mode.</p>
+            ) : null}
+            {selectedTask.status === "awaiting_scope_escalation_approval" ? (
+              <p className="task-header__warning">Обнаружено расширение scope: production modules требуют отдельного approval.</p>
+            ) : null}
+            {packageStatus ? (
+              <p className="task-header__warning">
+                Output package: {packageStatus}. Manual build: {routeDecision.manual_build_required === true ? "yes" : "no"}.
+              </p>
             ) : null}
             <h3>Решение маршрутизатора</h3>
             <pre className="json-block">{JSON.stringify(routeDecision, null, 2)}</pre>

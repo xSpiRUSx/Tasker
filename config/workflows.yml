@@ -55,7 +55,7 @@ workflows:
     requires_review: true
     requires_config_approval: true
     requires_deploy_prep: false
-    use_worktree: true
+    use_worktree: false
     approval_gates: ["plan", "spec", "security_change", "diff", "commit"]
     risk_flags:
       - 1c_business_logic
@@ -100,7 +100,7 @@ workflows:
     requires_review: true
     requires_config_approval: false
     requires_deploy_prep: false
-    use_worktree: true
+    use_worktree: false
     approval_gates: ["plan", "diff", "commit"]
     blocked_change_types:
       - metadata_shape_change
@@ -128,7 +128,7 @@ workflows:
     requires_review: true
     requires_config_approval: false
     requires_deploy_prep: false
-    use_worktree: true
+    use_worktree: false
     approval_gates: ["diff", "commit"]
     steps:
       - Resolve the parent task.
@@ -150,7 +150,7 @@ workflows:
     requires_review: true
     requires_config_approval: false
     requires_deploy_prep: false
-    use_worktree: true
+    use_worktree: false
     approval_gates: ["plan", "diff", "commit"]
     blocked_change_types: ["configuration_change", "dependency_change", "migration", "deployment_change", "security_change", "architecture_change"]
     steps:
@@ -171,7 +171,7 @@ workflows:
     requires_spec: false
     requires_tests: true
     requires_review: true
-    use_worktree: true
+    use_worktree: false
     approval_gates: ["plan", "diff", "commit"]
     blocked_change_types:
       - configuration_change
@@ -199,7 +199,7 @@ workflows:
     requires_tests: true
     requires_review: true
     requires_config_approval: true
-    use_worktree: true
+    use_worktree: false
     approval_gates: ["plan", "config_change", "diff", "commit"]
     steps:
       - Collect relevant context.
@@ -225,7 +225,7 @@ workflows:
     requires_tests: true
     requires_review: true
     requires_deploy_prep: true
-    use_worktree: true
+    use_worktree: false
     approval_gates: ["spec", "plan", "diff", "commit", "deploy_prep"]
     steps:
       - Collect context.

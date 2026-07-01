@@ -1,10 +1,11 @@
 import type { ReactNode } from "react";
-import { Activity, AlertCircle, CheckCircle2, FileSliders, ListTodo, PlusCircle, Route } from "lucide-react";
+import { Activity, AlertCircle, CheckCircle2, FileSliders, ListTodo, PlusCircle, Route, Settings } from "lucide-react";
 import { ErrorBanner } from "./ErrorBanner";
 
-export type AppView = "create" | "tasks" | "config" | "routing";
+export type AppView = "create" | "tasks" | "settings" | "config" | "routing";
 
 interface AppShellProps {
+  advancedUi: boolean;
   apiHealthy: boolean;
   children: ReactNode;
   currentView: AppView;
@@ -15,14 +16,16 @@ interface AppShellProps {
   onNavigate: (view: AppView) => void;
 }
 
-const NAV_ITEMS: Array<{ view: AppView; href: string; label: string; icon: ReactNode }> = [
-  { view: "create", href: "/tasks/new", label: "Новая задача", icon: <PlusCircle size={16} /> },
+const NAV_ITEMS: Array<{ advancedOnly?: boolean; view: AppView; href: string; label: string; icon: ReactNode }> = [
+  { view: "create", href: "/tasks/new", label: "Создать задачу", icon: <PlusCircle size={16} /> },
   { view: "tasks", href: "/tasks", label: "Задачи", icon: <ListTodo size={16} /> },
-  { view: "config", href: "/settings/config", label: "Конфигурация", icon: <FileSliders size={16} /> },
-  { view: "routing", href: "/settings/routing-rules", label: "Маршрутизация", icon: <Route size={16} /> },
+  { view: "settings", href: "/settings", label: "Настройки", icon: <Settings size={16} /> },
+  { advancedOnly: true, view: "config", href: "/settings/config", label: "Конфигурация", icon: <FileSliders size={16} /> },
+  { advancedOnly: true, view: "routing", href: "/settings/routing-rules", label: "Маршрутизация", icon: <Route size={16} /> },
 ];
 
 export function AppShell({
+  advancedUi,
   apiHealthy,
   children,
   currentView,
@@ -37,10 +40,10 @@ export function AppShell({
       <header className="topbar">
         <div className="topbar__left">
           <a className="brand" href="/">
-            TAsker
+            Tasker
           </a>
-          <nav className="topbar__nav">
-            {NAV_ITEMS.map((item) => (
+          <nav className="topbar__nav" aria-label="Основная навигация">
+            {NAV_ITEMS.filter((item) => advancedUi || !item.advancedOnly).map((item) => (
               <a
                 className={currentView === item.view ? "topbar__link topbar__link--active" : "topbar__link"}
                 href={item.href}
@@ -56,9 +59,12 @@ export function AppShell({
             ))}
           </nav>
         </div>
-        <div className={apiHealthy ? "api-state api-state--ok" : "api-state api-state--bad"}>
+        <div
+          className={apiHealthy ? "api-state api-state--ok" : "api-state api-state--bad"}
+          title={apiHealthy ? "Сервер отвечает на запросы" : "Проверьте, запущен ли backend Tasker"}
+        >
           {apiHealthy ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
-          API: {apiHealthy ? "доступен" : "недоступен"}
+          {apiHealthy ? "Сервер подключен" : "Нет связи с сервером"}
         </div>
       </header>
       {error ? <ErrorBanner message={error} onDismiss={onDismissError} /> : null}

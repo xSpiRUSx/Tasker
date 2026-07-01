@@ -19,7 +19,7 @@ export function EventsPanel({ setError, taskId }: EventsPanelProps) {
         setEvents(response.items);
         setError(null);
       } catch (error) {
-        setError(error instanceof Error ? error.message : "Не удалось загрузить события");
+        setError(error instanceof Error ? error.message : "Не удалось загрузить события.");
       }
     }
     void load();
@@ -37,6 +37,7 @@ export function EventsPanel({ setError, taskId }: EventsPanelProps) {
         </label>
       </div>
       <div className="timeline">
+        {visibleEvents.length === 0 ? <div className="empty">Событий пока нет.</div> : null}
         {visibleEvents.map((event) => (
           <article className="timeline-item" key={event.id}>
             <time>{formatDate(event.created_at)}</time>

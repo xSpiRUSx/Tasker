@@ -13,11 +13,16 @@ import type { Approval, ListTasksParams, RouteDecision, Task } from "./api/types
 import { AppShell, type AppView } from "./components/AppShell";
 import { ConfigEditor } from "./components/ConfigEditor";
 import { RoutingRulesSettings } from "./components/RoutingRulesSettings";
+import { SettingsPanel } from "./components/SettingsPanel";
 import { TaskCreateForm } from "./components/TaskCreateForm";
 import { TaskDetail } from "./components/TaskDetail";
 import { TaskList } from "./components/TaskList";
+import { isAdvancedUiEnabled, setAdvancedUiEnabled } from "./uiMode";
+import { userFacingError } from "./i18n";
 
 const POLL_INTERVAL_MS = Number(import.meta.env.VITE_POLL_INTERVAL_MS || 3000);
+const ADVANCED_FORCED = import.meta.env.VITE_TASKER_ADVANCED_UI === "true";
+
 const STATUS_GROUPS: Record<string, string[]> = {
   "group:awaiting": [
     "awaiting_plan_approval",
@@ -50,8 +55,9 @@ const STATUS_GROUPS: Record<string, string[]> = {
 };
 
 export default function App() {
+  const [advancedUi, setAdvancedUi] = useState(() => isAdvancedUiEnabled());
   const [apiHealthy, setApiHealthy] = useState(false);
-  const [view, setView] = useState<AppView>(() => viewFromPath(window.location.pathname));
+  const [view, setView] = useState<AppView>(() => viewFromPath(window.location.pathname, isAdvancedUiEnabled()));
   const [tasks, setTasks] = useState<Task[]>([]);
   const [total, setTotal] = useState(0);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -79,6 +85,10 @@ export default function App() {
     if (params.status?.startsWith("group:") || params.status === "pending_approvals") {
       delete params.status;
     }
+    if (!advancedUi) {
+      delete params.project_id;
+      delete params.workflow_id;
+    }
     const response = await listTasks(params);
     let items = response.items;
     if (localStatusFilter === "pending_approvals") {
@@ -92,7 +102,7 @@ export default function App() {
     if (!selectedTaskId && items.length > 0) {
       setSelectedTaskId(items[0].id);
     }
-  }, [filters, localStatusFilter, selectedTaskId]);
+  }, [advancedUi, filters, localStatusFilter, selectedTaskId]);
 
   const loadSelectedTask = useCallback(async () => {
     if (!selectedTaskId) {
@@ -111,9 +121,9 @@ export default function App() {
       await Promise.all([loadHealth(), loadTasks(), loadSelectedTask()]);
       setError(null);
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Не удалось обновить данные");
+      setError(advancedUi && error instanceof Error ? error.message : userFacingError());
     }
-  }, [loadHealth, loadSelectedTask, loadTasks]);
+  }, [advancedUi, loadHealth, loadSelectedTask, loadTasks]);
 
   useEffect(() => {
     void refresh();
@@ -130,17 +140,27 @@ export default function App() {
   }, [toast]);
 
   useEffect(() => {
-    const onPopState = () => setView(viewFromPath(window.location.pathname));
+    const onPopState = () => setView(viewFromPath(window.location.pathname, advancedUi));
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, []);
+  }, [advancedUi]);
 
   function navigate(nextView: AppView) {
-    const nextPath = pathForView(nextView);
+    const safeView = !advancedUi && (nextView === "config" || nextView === "routing") ? "settings" : nextView;
+    const nextPath = pathForView(safeView);
     if (window.location.pathname !== nextPath) {
       window.history.pushState({}, "", nextPath);
     }
-    setView(nextView);
+    setView(safeView);
+  }
+
+  function handleAdvancedUiChange(value: boolean) {
+    const nextValue = ADVANCED_FORCED ? true : value;
+    setAdvancedUiEnabled(nextValue);
+    setAdvancedUi(nextValue);
+    if (!nextValue && (view === "config" || view === "routing")) {
+      navigate("settings");
+    }
   }
 
   async function handlePreview(message: string) {
@@ -149,7 +169,7 @@ export default function App() {
       setRoutePreview(await routeTask(message));
       setError(null);
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Не удалось построить маршрут");
+      setError(advancedUi && error instanceof Error ? error.message : "Не удалось проверить маршрут задачи.");
     } finally {
       setBusy(null);
     }
@@ -160,12 +180,12 @@ export default function App() {
     try {
       const response = await createTask(input);
       setSelectedTaskId(response.task_id);
-      setToast(`Задача ${response.task_id} создана`);
+      setToast("Задача создана");
       setRoutePreview(null);
       navigate("tasks");
       await refresh();
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Не удалось создать задачу");
+      setError(advancedUi && error instanceof Error ? error.message : "Не удалось создать задачу. Проверьте подключение к серверу.");
     } finally {
       setBusy(null);
     }
@@ -177,11 +197,11 @@ export default function App() {
     }
     setBusy("correction");
     try {
-      const job = await sendTaskMessage(selectedTaskId, message);
-      setToast(`Сообщение принято; ${job.action} в очереди`);
+      await sendTaskMessage(selectedTaskId, message);
+      setToast("Сообщение принято, Tasker поставил действие в очередь");
       await refresh();
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Не удалось отправить сообщение");
+      setError(advancedUi && error instanceof Error ? error.message : "Не удалось отправить сообщение.");
     } finally {
       setBusy(null);
     }
@@ -197,7 +217,7 @@ export default function App() {
       setToast("Задача отменена");
       await refresh();
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Не удалось отменить задачу");
+      setError(advancedUi && error instanceof Error ? error.message : "Не удалось отменить задачу.");
     } finally {
       setBusy(null);
     }
@@ -205,6 +225,7 @@ export default function App() {
 
   return (
     <AppShell
+      advancedUi={advancedUi}
       apiHealthy={apiHealthy}
       currentView={view}
       error={error}
@@ -213,13 +234,15 @@ export default function App() {
       onDismissError={() => setError(null)}
       onNavigate={navigate}
     >
-      {view === "routing" ? (
-        <RoutingRulesSettings setError={setError} setToast={setToast} />
+      {view === "settings" ? (
+        <SettingsPanel advancedUi={advancedUi} onAdvancedUiChange={handleAdvancedUiChange} onNavigate={navigate} />
       ) : null}
-      {view === "config" ? <ConfigEditor setError={setError} setToast={setToast} /> : null}
+      {advancedUi && view === "routing" ? <RoutingRulesSettings setError={setError} setToast={setToast} /> : null}
+      {advancedUi && view === "config" ? <ConfigEditor setError={setError} setToast={setToast} /> : null}
       {view === "create" ? (
         <main className="main create-main">
           <TaskCreateForm
+            advancedUi={advancedUi}
             busy={busy}
             layout="page"
             onCreate={handleCreate}
@@ -232,6 +255,7 @@ export default function App() {
         <>
           <aside className="sidebar">
             <TaskList
+              advancedUi={advancedUi}
               filters={filters}
               onSelectTask={setSelectedTaskId}
               onSetFilters={setFilters}
@@ -241,6 +265,7 @@ export default function App() {
             />
           </aside>
           <TaskDetail
+            advancedUi={advancedUi}
             approvals={approvals}
             busy={busy}
             onCancel={handleCancel}
@@ -256,9 +281,10 @@ export default function App() {
   );
 }
 
-function viewFromPath(pathname: string): AppView {
-  if (pathname === "/settings/routing-rules") return "routing";
-  if (pathname === "/settings/config") return "config";
+function viewFromPath(pathname: string, advancedUi: boolean): AppView {
+  if (advancedUi && pathname === "/settings/routing-rules") return "routing";
+  if (advancedUi && pathname === "/settings/config") return "config";
+  if (pathname === "/settings") return "settings";
   if (pathname === "/tasks/new") return "create";
   if (pathname === "/tasks" || pathname.startsWith("/tasks/")) return "tasks";
   return "create";
@@ -267,6 +293,7 @@ function viewFromPath(pathname: string): AppView {
 function pathForView(view: AppView): string {
   if (view === "routing") return "/settings/routing-rules";
   if (view === "config") return "/settings/config";
+  if (view === "settings") return "/settings";
   if (view === "tasks") return "/tasks";
   return "/tasks/new";
 }

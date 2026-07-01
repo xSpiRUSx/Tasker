@@ -24,17 +24,20 @@ export function CorrectionPanel({ busy, onCorrection, task }: CorrectionPanelPro
     <section className="panel">
       <h2>Сообщение</h2>
       <p className="approval-note">{label}</p>
-      <textarea
-        value={message}
-        onChange={(event) => setMessage(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.ctrlKey && event.key === "Enter") {
-            void submit();
-          }
-        }}
-        placeholder={placeholder}
-        rows={5}
-      />
+      <label className="field-label">
+        <span>Комментарий или запрос правок</span>
+        <textarea
+          value={message}
+          onChange={(event) => setMessage(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.ctrlKey && event.key === "Enter") {
+              void submit();
+            }
+          }}
+          placeholder={placeholder}
+          rows={5}
+        />
+      </label>
       <button type="button" disabled={!message.trim() || busy === "correction"} onClick={() => void submit()}>
         <Send size={16} />
         {busy === "correction" ? "Ставлю в очередь..." : buttonLabel(status)}
@@ -44,22 +47,22 @@ export function CorrectionPanel({ busy, onCorrection, task }: CorrectionPanelPro
 }
 
 function actionLabel(status: string) {
-  if (status === "changes_requested") return "Создать план правки из комментария.";
+  if (status === "changes_requested") return "Создайте план правки из комментария.";
   if (status === "executing_correction" || status === "validating_correction") return "Запрошенные правки применяются.";
-  if (status === "awaiting_correction_diff_approval") return "Проверьте обновленный diff после правки.";
+  if (status === "awaiting_correction_diff_approval") return "Проверьте обновленные изменения после правки.";
   if (status === "correction_blocked") return "Правка заблокирована; сузьте запрос или создайте связанную задачу.";
-  if (status === "validation_failed") return "Отправьте замечания валидации и создайте план исправления.";
+  if (status === "validation_failed") return "Отправьте замечания проверки и создайте план исправления.";
   if (status === "prompt_too_large") return "Попросите Tasker сжать контекст перед повторным запуском.";
   if (status === "plan_rejected") return "Уточните отклоненный план конкретным запросом.";
-  return "Отправить сообщение или запрос правки.";
+  return "Отправьте сообщение или запрос правки.";
 }
 
 function placeholderFor(status: string) {
   if (status === "prompt_too_large") return "Сжать контекст и повторить выполнение только с актуальными артефактами.";
   if (status === "changes_requested") return "Создать план правки по моим комментариям: ...";
-  if (status === "correction_blocked") return "Сузить правку до проверенного diff: ...";
-  if (status === "validation_failed") return "Исправить ошибку валидации: ...";
-  return "Сообщение к задаче / запрос правки";
+  if (status === "correction_blocked") return "Сузить правку до проверенного набора изменений: ...";
+  if (status === "validation_failed") return "Исправить ошибку проверки: ...";
+  return "Сообщение к задаче или запрос правки";
 }
 
 function buttonLabel(status: string) {

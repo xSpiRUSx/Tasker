@@ -1,10 +1,12 @@
 import { useState } from "react";
-import { Check, Play, ClipboardList, X } from "lucide-react";
+import { Check, ClipboardList, Play, X } from "lucide-react";
 import { createCorrection, decideApproval } from "../api/client";
 import type { Approval } from "../api/types";
-import { gateLabel, formatDate } from "../i18n";
+import { formatDate, gateLabel, statusLabel } from "../i18n";
+import { AdvancedSection } from "./AdvancedSection";
 
 interface ApprovalPanelProps {
+  advancedUi: boolean;
   approvals: Approval[];
   busy: string | null;
   onRefresh: () => Promise<void>;
@@ -25,7 +27,7 @@ const DANGEROUS_GATES = new Set([
   "scope_escalation",
 ]);
 
-export function ApprovalPanel({ approvals, busy, onRefresh, setError, setToast, taskId }: ApprovalPanelProps) {
+export function ApprovalPanel({ advancedUi, approvals, busy, onRefresh, setError, setToast, taskId }: ApprovalPanelProps) {
   const [comment, setComment] = useState("");
   const [loading, setLoading] = useState<"approve" | "reject" | "run" | "plan" | null>(null);
   const pending = approvals.find((approval) => approval.status === "pending") || null;
@@ -40,19 +42,18 @@ export function ApprovalPanel({ approvals, busy, onRefresh, setError, setToast, 
     if (decision === "approve" && DANGEROUS_GATES.has(pending.gate)) {
       const text =
         pending.gate === "commit"
-          ? `Вы разрешаете коммит для ${taskId}. Это может создать git commit в task worktree.`
-          : `Вы подтверждаете gate ${pending.gate} для ${taskId}. Проверьте артефакты и результат валидации.`;
+          ? "Вы разрешаете зафиксировать изменения. Проверьте артефакты и результат проверки."
+          : `Вы подтверждаете этап: ${gateLabel(pending.gate)}. Проверьте артефакты и результат проверки.`;
       if (!window.confirm(text)) return;
     }
     setLoading(decision);
     try {
-      const job = await decideApproval(taskId, pending.gate, { decision, comment: comment.trim() || null });
-      const action = decision === "approve" ? "подтвержден" : "отклонен";
-      setToast(`${pending.gate} ${action}; ${job.action} в очереди`);
+      await decideApproval(taskId, pending.gate, { decision, comment: comment.trim() || null });
+      setToast(decision === "approve" ? "Подтверждение принято" : "Запрос правок принят");
       setComment("");
       await onRefresh();
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Не удалось выполнить approval-действие");
+      setError(error instanceof Error ? error.message : "Не удалось выполнить действие подтверждения.");
     } finally {
       setLoading(null);
     }
@@ -67,21 +68,17 @@ export function ApprovalPanel({ approvals, busy, onRefresh, setError, setToast, 
     const loadingKey = action === "run_without_new_plan" ? "run" : "plan";
     setLoading(loadingKey);
     try {
-      const correction = await createCorrection(taskId, {
+      await createCorrection(taskId, {
         source_gate: pending.gate,
         source_approval_id: pending.id,
         comment: comment.trim(),
         action,
       });
-      setToast(
-        action === "run_without_new_plan"
-          ? `Запрос правки создан. Режим: ${correction.mode}.`
-          : `Запрос правки создан. Режим: ${correction.mode}. Запрошено approval плана.`,
-      );
+      setToast(action === "run_without_new_plan" ? "Запрос правки создан" : "Запрос правки с новым планом создан");
       setComment("");
       await onRefresh();
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Не удалось создать запрос правки");
+      setError(error instanceof Error ? error.message : "Не удалось создать запрос правки.");
     } finally {
       setLoading(null);
     }
@@ -89,30 +86,44 @@ export function ApprovalPanel({ approvals, busy, onRefresh, setError, setToast, 
 
   return (
     <section className="panel">
-      <h2>Approval</h2>
+      <h2>Подтверждение</h2>
       {pending ? (
         <>
-          <dl className="kv">
-            <dt>gate</dt>
-            <dd>{gateLabel(pending.gate)}</dd>
-            <dt>status</dt>
-            <dd>{pending.status}</dd>
-            <dt>created_at</dt>
-            <dd>{formatDate(pending.created_at)}</dd>
-            <dt>artifact_ids</dt>
-            <dd>{pending.artifact_ids.join(", ") || "нет"}</dd>
-          </dl>
+          <div className="approval-summary">
+            <strong>Требуется подтверждение: {gateLabel(pending.gate)}</strong>
+            <span>Проверьте артефакты и выберите действие.</span>
+          </div>
+          <AdvancedSection enabled={advancedUi}>
+            <dl className="kv">
+              <dt>Этап подтверждения</dt>
+              <dd>{gateLabel(pending.gate)}</dd>
+              <dt>Статус</dt>
+              <dd>{statusLabel(pending.status)}</dd>
+              <dt>Создано</dt>
+              <dd>{formatDate(pending.created_at)}</dd>
+              <dt>ID</dt>
+              <dd>{pending.id}</dd>
+              <dt>Связанные артефакты</dt>
+              <dd>{pending.artifact_ids.join(", ") || "нет"}</dd>
+            </dl>
+          </AdvancedSection>
           <p className="approval-note">
             {isDiffGate
-              ? "Комментарий к diff может стать основанием для точечной правки, если она не меняет объем задачи и не задевает рискованные области."
-              : "Подтверждение gate может сразу открыть следующий обязательный этап."}
+              ? "Комментарий к изменениям можно использовать как запрос точечной правки."
+              : "После подтверждения Tasker перейдет к следующему этапу."}
           </p>
-          <pre className="json-block">{JSON.stringify(pending.requested_payload, null, 2)}</pre>
-          <textarea value={comment} onChange={(event) => setComment(event.target.value)} placeholder="Комментарий" rows={4} />
+          <AdvancedSection enabled={advancedUi}>
+            <h3>Технические данные запроса</h3>
+            <pre className="json-block">{JSON.stringify(pending.requested_payload, null, 2)}</pre>
+          </AdvancedSection>
+          <label className="field-label">
+            <span>Комментарий</span>
+            <textarea value={comment} onChange={(event) => setComment(event.target.value)} placeholder="Что нужно изменить или проверить" rows={4} />
+          </label>
           <div className="button-row">
             <button type="button" disabled={busy === "approval" || loading !== null} onClick={() => void decide("approve")}>
               <Check size={16} />
-              {loading === "approve" ? "Подтверждаю..." : isDiffGate ? "Подтвердить diff" : "Подтвердить"}
+              {loading === "approve" ? "Подтверждаю..." : isDiffGate ? "Подтвердить изменения" : "Подтвердить"}
             </button>
             {isDiffGate ? (
               <>
@@ -134,7 +145,7 @@ export function ApprovalPanel({ approvals, busy, onRefresh, setError, setToast, 
           </div>
         </>
       ) : (
-        <div className="empty">Нет ожидающих approvals.</div>
+        <div className="empty">Сейчас подтверждения не требуются.</div>
       )}
     </section>
   );

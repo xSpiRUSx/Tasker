@@ -23,7 +23,7 @@ export function RunsPanel({ setError, taskId }: RunsPanelProps) {
         setSteps(Object.fromEntries(stepPairs));
         setError(null);
       } catch (error) {
-        setError(error instanceof Error ? error.message : "Не удалось загрузить запуски");
+        setError(error instanceof Error ? error.message : "Не удалось загрузить запуски.");
       }
     }
     void load();
@@ -41,15 +41,15 @@ export function RunsPanel({ setError, taskId }: RunsPanelProps) {
         <article className="run-card" key={run.id}>
           <h3>{run.id}</h3>
           <dl className="kv">
-            <dt>type</dt>
+            <dt>Тип</dt>
             <dd>{run.run_type}</dd>
-            <dt>status</dt>
+            <dt>Статус</dt>
             <dd>{statusLabel(run.status)}</dd>
-            <dt>executor</dt>
+            <dt>Исполнитель</dt>
             <dd>{displayValue(run.executor)}</dd>
-            <dt>started</dt>
+            <dt>Старт</dt>
             <dd>{formatDate(run.started_at)}</dd>
-            <dt>finished</dt>
+            <dt>Завершение</dt>
             <dd>{formatDate(run.finished_at)}</dd>
           </dl>
           <div className="table-wrap">
@@ -57,9 +57,9 @@ export function RunsPanel({ setError, taskId }: RunsPanelProps) {
               <thead>
                 <tr>
                   <th>#</th>
-                  <th>шаг</th>
-                  <th>статус</th>
-                  <th>итог</th>
+                  <th>Шаг</th>
+                  <th>Статус</th>
+                  <th>Итог</th>
                 </tr>
               </thead>
               <tbody>
@@ -67,7 +67,7 @@ export function RunsPanel({ setError, taskId }: RunsPanelProps) {
                   <tr key={step.id}>
                     <td>{step.step_index}</td>
                     <td>{step.step_type}</td>
-                    <td>{step.status}</td>
+                    <td>{statusLabel(step.status)}</td>
                     <td>{step.output_summary || step.input_summary || step.error || ""}</td>
                   </tr>
                 ))}

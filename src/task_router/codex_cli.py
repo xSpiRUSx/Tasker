@@ -23,6 +23,7 @@ User task:
 
     codex_bin = _resolve_codex_bin(os.getenv("TASK_ROUTER_CODEX_BIN", "codex"))
     model = os.getenv("TASK_ROUTER_CODEX_MODEL")
+    timeout_seconds = int(os.getenv("TASK_ROUTER_CODEX_TIMEOUT_SECONDS", "120"))
 
     with tempfile.TemporaryDirectory(prefix="task-router-codex-") as tmp:
         schema_path = Path(tmp) / "analysis.schema.json"
@@ -32,14 +33,18 @@ User task:
         if model:
             command.extend(["--model", model])
 
-        completed = subprocess.run(
-            _windows_command(command),
-            check=False,
-            capture_output=True,
-            input=prompt,
-            text=True,
-            encoding="utf-8",
-        )
+        try:
+            completed = subprocess.run(
+                _windows_command(command),
+                check=False,
+                capture_output=True,
+                input=prompt,
+                text=True,
+                encoding="utf-8",
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"Codex CLI classification timed out after {timeout_seconds} seconds.") from exc
 
     if completed.returncode != 0:
         stderr = completed.stderr.strip()

@@ -17,7 +17,7 @@ export function JobsPanel({ setError, taskId }: JobsPanelProps) {
       const response = await listJobs(taskId);
       setJobs(response.items.slice().reverse());
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Не удалось загрузить jobs");
+      setError(error instanceof Error ? error.message : "Не удалось загрузить фоновые операции.");
     }
   }
 
@@ -26,7 +26,7 @@ export function JobsPanel({ setError, taskId }: JobsPanelProps) {
       await cancelJob(id);
       await load();
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Не удалось отменить job");
+      setError(error instanceof Error ? error.message : "Не удалось отменить фоновую операцию.");
     }
   }
 
@@ -38,7 +38,7 @@ export function JobsPanel({ setError, taskId }: JobsPanelProps) {
 
   return (
     <section className="panel">
-      <h2>Jobs</h2>
+      <h2>Фоновые операции</h2>
       {current ? (
         <dl className="kv">
           <dt>Действие</dt>
@@ -51,12 +51,12 @@ export function JobsPanel({ setError, taskId }: JobsPanelProps) {
           <dd>{displayValue(current.error)}</dd>
         </dl>
       ) : (
-        <div className="empty">Jobs пока нет.</div>
+        <div className="empty">Фоновых операций пока нет.</div>
       )}
       {current && ["queued", "running"].includes(String(current.status)) ? (
         <button className="icon-button" type="button" onClick={() => void cancel(current.id)}>
           <Ban size={16} />
-          Отменить job
+          Отменить операцию
         </button>
       ) : null}
     </section>

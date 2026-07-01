@@ -22,12 +22,24 @@ class PlanDraft(BaseModel):
 
 
 class PlanWriter(Protocol):
-    def write_plan(self, task: Task, route: RouteDecision, context_markdown: str) -> PlanDraft:
+    def write_plan(
+        self,
+        task: Task,
+        route: RouteDecision,
+        context_markdown: str,
+        model: str | None = None,
+    ) -> PlanDraft:
         ...
 
 
 class MockPlanWriter:
-    def write_plan(self, task: Task, route: RouteDecision, context_markdown: str) -> PlanDraft:
+    def write_plan(
+        self,
+        task: Task,
+        route: RouteDecision,
+        context_markdown: str,
+        model: str | None = None,
+    ) -> PlanDraft:
         spec_markdown = ""
         if route.requires_spec:
             spec_markdown = f"""# Specification
@@ -127,15 +139,22 @@ class CodexPlanWriter:
         self.model = model
         self.timeout_seconds = timeout_seconds
 
-    def write_plan(self, task: Task, route: RouteDecision, context_markdown: str) -> PlanDraft:
+    def write_plan(
+        self,
+        task: Task,
+        route: RouteDecision,
+        context_markdown: str,
+        model: str | None = None,
+    ) -> PlanDraft:
         schema = _strict_json_schema(PlanDraft.model_json_schema())
         with tempfile.TemporaryDirectory(prefix="tasker-plan-codex-") as tmp:
             schema_path = Path(tmp) / "plan.schema.json"
             schema_path.write_text(json.dumps(schema, ensure_ascii=False, indent=2), encoding="utf-8")
 
             command = [self._resolve_codex_bin(), "exec", "-", "--output-schema", str(schema_path), "--skip-git-repo-check"]
-            if self.model:
-                command.extend(["--model", self.model])
+            selected_model = model or self.model
+            if selected_model:
+                command.extend(["--model", selected_model])
 
             completed = subprocess.run(
                 self._windows_command(command),
@@ -227,13 +246,19 @@ class PlanningService:
         else:
             self.writer = MockPlanWriter()
 
-    def write_plan(self, task: Task, route: RouteDecision, context_markdown: str) -> PlanDraft:
+    def write_plan(
+        self,
+        task: Task,
+        route: RouteDecision,
+        context_markdown: str,
+        model: str | None = None,
+    ) -> PlanDraft:
         try:
-            return self.writer.write_plan(task, route, context_markdown)
+            return self.writer.write_plan(task, route, context_markdown, model=model)
         except Exception as exc:
             if self.provider != "codex-cli":
                 raise
-            draft = MockPlanWriter().write_plan(task, route, context_markdown)
+            draft = MockPlanWriter().write_plan(task, route, context_markdown, model=model)
             draft.planning_notes = (
                 "Codex CLI planning failed; deterministic mock planner fallback was used. "
                 f"Error: {exc}"

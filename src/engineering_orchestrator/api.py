@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
+import time
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Protocol
@@ -314,6 +316,48 @@ class Orchestrator:
             usage_is_estimated=usage.is_estimated,
             status=result.status,
             error=result.summary if result.status != "success" else None,
+        )
+
+    def _record_estimated_model_call(
+        self,
+        task: Task,
+        run_id: str | None,
+        operation: str,
+        runtime: str,
+        model: str,
+        *,
+        provider: str | None = None,
+        reasoning_effort: str | None = None,
+        prompt_chars: int = 0,
+        completion_chars: int = 0,
+        latency_ms: int | None = None,
+        status: str = "success",
+        error: str | None = None,
+    ) -> None:
+        if runtime in {"", "none", "mock", "deterministic"}:
+            return
+        if model in {"", "none", "mock"}:
+            return
+        usage = estimate_token_usage(prompt_chars, completion_chars)
+        self.task_store.add_model_call(
+            task.id,
+            run_id,
+            operation,
+            runtime,
+            model,
+            provider=provider,
+            reasoning_effort=reasoning_effort,
+            prompt_chars=prompt_chars,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            cached_prompt_tokens=usage.cached_prompt_tokens,
+            reasoning_tokens=usage.reasoning_tokens,
+            total_tokens=usage.total_tokens,
+            usage_source=usage.source,
+            usage_is_estimated=True,
+            latency_ms=latency_ms,
+            status=status,
+            error=error,
         )
 
     def route_adaptive(self, message: str, context: RoutingContext | dict[str, Any] | None = None) -> AdaptiveRoutingDecision:
@@ -817,6 +861,7 @@ class Orchestrator:
 
         route_payload: dict[str, Any] | None = None
         linked_detection: LinkedTaskDetectionResult | None = None
+        route_model_decision_recorded = False
         adaptive_decision = self._run_adaptive_routing(
             task.user_message,
             RoutingContext(task_id=task.id, source=task.source, recent_task_ids=[]),
@@ -841,9 +886,69 @@ class Orchestrator:
             route = self._route_linked_correction(task, linked_detection)
             route_payload = route.model_dump()
         elif route_payload is None and self.task_router is not None:
-            external_route = self.task_router.route(task.user_message)
-            route_payload = self._model_dump(external_route)
-            route = self._normalize_route_decision(route_payload)
+            router_provider = str(getattr(self.task_router, "provider", self.settings.router_provider))
+            prompt_chars = self._estimate_router_prompt_chars(task.user_message)
+            started = time.monotonic()
+            try:
+                external_route = self.task_router.route(task.user_message)
+                latency_ms = int((time.monotonic() - started) * 1000)
+                route_payload = self._model_dump(external_route)
+                route = self._normalize_route_decision(route_payload)
+                if router_provider == "codex-cli":
+                    router_model = os.getenv("TASK_ROUTER_CODEX_MODEL") or "codex-cli-default"
+                    self._record_static_model_decision(
+                        task,
+                        None,
+                        "route_task",
+                        "task_router_codex_cli",
+                        "codex_cli",
+                        router_model,
+                        "configured task router provider",
+                        estimated_prompt_chars=prompt_chars,
+                    )
+                    route_model_decision_recorded = True
+                    self._record_estimated_model_call(
+                        task,
+                        None,
+                        "route_task",
+                        "codex_cli",
+                        router_model,
+                        provider="task_router",
+                        prompt_chars=prompt_chars,
+                        completion_chars=len(json.dumps(route_payload, ensure_ascii=False)),
+                        latency_ms=latency_ms,
+                    )
+            except Exception as exc:
+                latency_ms = int((time.monotonic() - started) * 1000)
+                route = self._mock_route_task(task)
+                warning = f"Configured task router failed; used fallback route. {exc}"
+                route.warnings.append(warning)
+                route_payload = route.model_dump()
+                if router_provider == "codex-cli":
+                    router_model = os.getenv("TASK_ROUTER_CODEX_MODEL") or "codex-cli-default"
+                    self._record_static_model_decision(
+                        task,
+                        None,
+                        "route_task",
+                        "task_router_codex_cli",
+                        "codex_cli",
+                        router_model,
+                        "configured task router provider failed",
+                        estimated_prompt_chars=prompt_chars,
+                    )
+                    route_model_decision_recorded = True
+                    self._record_estimated_model_call(
+                        task,
+                        None,
+                        "route_task",
+                        "codex_cli",
+                        router_model,
+                        provider="task_router",
+                        prompt_chars=prompt_chars,
+                        latency_ms=latency_ms,
+                        status="failed",
+                        error=str(exc),
+                    )
         elif route_payload is None:
             route = self._mock_route_task(task)
             route_payload = route.model_dump()
@@ -867,18 +972,19 @@ class Orchestrator:
             task.status = "routed" if route.workflow_id not in {None, "clarify"} else "awaiting_clarification"
         self.task_store.update_task(task)
         task = self._rename_artifact_folder_for_route(self.task_store.get_task(task.id))
-        self._record_model_decision(
-            task,
-            None,
-            ModelSelectionRequest(
-                task_id=task.id,
-                operation="route_task",
-                workflow_id=route.workflow_id,
-                project_id=route.project_id,
-                complexity=route.complexity,
-                risk_level=route.risk_level,
-            ),
-        )
+        if not route_model_decision_recorded:
+            self._record_model_decision(
+                task,
+                None,
+                ModelSelectionRequest(
+                    task_id=task.id,
+                    operation="route_task",
+                    workflow_id=route.workflow_id,
+                    project_id=route.project_id,
+                    complexity=route.complexity,
+                    risk_level=route.risk_level,
+                ),
+            )
 
         artifact = self.artifact_store.write_markdown(task, "route_decision", "Route decision", self._route_markdown(task, route))
         self.task_store.add_artifact(artifact)
@@ -964,6 +1070,18 @@ class Orchestrator:
             if rule_id.startswith("rule-"):
                 self.task_store.increment_routing_rule_hit(rule_id)
         return decision
+
+    def _estimate_router_prompt_chars(self, message: str) -> int:
+        config = getattr(self.task_router, "config", None)
+        if config is None:
+            return len(message)
+        projects = getattr(config, "projects", {}) or {}
+        workflows = getattr(config, "workflows", {}) or {}
+        tools = getattr(config, "tools", {}) or {}
+        project_chars = sum(len(str(item.model_dump() if hasattr(item, "model_dump") else item)) for item in projects.values())
+        workflow_chars = sum(len(str(item.model_dump() if hasattr(item, "model_dump") else item)) for item in workflows.values())
+        tool_chars = sum(len(str(item.model_dump() if hasattr(item, "model_dump") else item)) for item in tools.values())
+        return len(message) + project_chars + workflow_chars + tool_chars
 
     def _clarification_reasons(self, task: Task) -> list[str]:
         route = task.route_decision or {}
@@ -1660,7 +1778,7 @@ Budget chars: `{manifest.budget_chars}`
             operation = "create_1c_business_spec"
         else:
             operation = "create_complex_spec" if route.requires_spec or task.risk_level == "high" else "create_simple_plan"
-        self._record_model_decision(
+        decision_record = self._record_model_decision(
             task,
             None,
             ModelSelectionRequest(
@@ -1673,7 +1791,32 @@ Budget chars: `{manifest.budget_chars}`
                 estimated_prompt_chars=len(context_markdown),
             ),
         )
-        draft = self.planning_service.write_plan(task, route, context_markdown)
+        prompt_chars = len(context_markdown) + len(task.user_message) + len(json.dumps(route.model_dump(), ensure_ascii=False))
+        started = time.monotonic()
+        draft = self.planning_service.write_plan(task, route, context_markdown, model=decision_record.model)
+        latency_ms = int((time.monotonic() - started) * 1000)
+        if self.settings.planner_provider not in {"", "none", "mock"}:
+            self._record_estimated_model_call(
+                task,
+                None,
+                operation,
+                "codex_cli" if self.settings.planner_provider == "codex-cli" else decision_record.runtime,
+                decision_record.model,
+                provider=self.settings.planner_provider,
+                reasoning_effort=decision_record.reasoning_effort,
+                prompt_chars=prompt_chars,
+                completion_chars=sum(
+                    len(value or "")
+                    for value in [
+                        draft.spec_markdown,
+                        draft.todo_markdown,
+                        draft.test_plan_markdown,
+                        draft.approval_markdown,
+                        draft.planning_notes,
+                    ]
+                ),
+                latency_ms=latency_ms,
+            )
         artifacts = []
         version = self._next_plan_version(task.id)
 

@@ -16,26 +16,27 @@ export function ActionPanel({ busy, onRefresh, setError, setToast, task }: Actio
   async function run(action: string) {
     try {
       const job = await runTaskAction(task.id, action);
-      setToast(`${job.action} поставлено в очередь`);
+      setToast(`Фоновая операция поставлена в очередь: ${job.action}`);
       await onRefresh();
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Действие не выполнено");
+      setError(error instanceof Error ? error.message : "Действие не выполнено.");
     }
   }
 
   async function repair() {
+    if (!window.confirm("Восстановление состояния меняет технический статус задачи. Продолжить?")) return;
     try {
       await repairTaskState(task.id);
       setToast("Состояние задачи восстановлено");
       await onRefresh();
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Не удалось восстановить состояние");
+      setError(error instanceof Error ? error.message : "Не удалось восстановить состояние.");
     }
   }
 
   return (
     <section className="panel">
-      <h2>Действия</h2>
+      <h2>Диагностика</h2>
       <div className="button-row">
         {actions.map((action) => (
           <button key={action.id} type="button" disabled={busy !== null} onClick={() => void run(action.id)}>
@@ -45,7 +46,7 @@ export function ActionPanel({ busy, onRefresh, setError, setToast, task }: Actio
         ))}
         <button type="button" disabled={busy !== null} onClick={() => void repair()}>
           <Wrench size={16} />
-          Починить состояние
+          Восстановить состояние
         </button>
       </div>
     </section>
@@ -76,12 +77,12 @@ function actionsForStatus(status: string) {
   }
   if (status === "awaiting_diff_approval" || status === "awaiting_diff_reapproval") {
     return [
-      { id: "package-external-processing", label: "Package output", icon: <Package size={16} /> },
+      { id: "package-external-processing", label: "Собрать пакет результата", icon: <Package size={16} /> },
       { id: "rebuild-context", label: "Обновить контекст", icon: <RefreshCcw size={16} /> },
     ];
   }
   if (status === "closed") {
-    return [{ id: "finalize-artifacts", label: "Refresh final artifacts", icon: <Archive size={16} /> }];
+    return [{ id: "finalize-artifacts", label: "Обновить итоговые артефакты", icon: <Archive size={16} /> }];
   }
   if (status === "changes_requested" || status === "correction_blocked") {
     return [

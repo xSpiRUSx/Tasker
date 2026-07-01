@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import subprocess
 
 import pytest
 
+from task_router.codex_cli import analyze_with_codex_cli
 from task_router.config_loader import load_router_config
 from task_router.graph import build_graph
 from task_router.heuristics import infer_intent, infer_project_id, infer_task_kind
@@ -252,3 +254,16 @@ workflows:
 
     with pytest.raises(ValueError, match="must define at least one complexity"):
         load_router_config(projects_path, workflows_path)
+
+
+def test_codex_cli_router_times_out(monkeypatch):
+    config = load_router_config(ROOT / "config" / "projects.yml", ROOT / "config" / "workflows.yml")
+
+    def fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs["timeout"])
+
+    monkeypatch.setenv("TASK_ROUTER_CODEX_TIMEOUT_SECONDS", "1")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="timed out after 1 seconds"):
+        analyze_with_codex_cli("Route this task", config)

@@ -82,6 +82,29 @@ class RecordingGitService:
         return ""
 
 
+class FailingTaskRouter:
+    provider = "codex-cli"
+
+    def route(self, message: str):
+        raise RuntimeError("router timeout")
+
+
+def test_create_task_falls_back_when_configured_router_fails(tmp_path):
+    orchestrator = Orchestrator(make_settings(tmp_path), task_router=FailingTaskRouter())
+
+    response = orchestrator.create_task(CreateTaskRequest(message="Fix billing-api login bug", source="test"))
+    task = orchestrator.task_store.get_task(response.task_id)
+
+    assert task.status != "routing"
+    assert task.route_decision is not None
+    assert any("Configured task router failed" in warning for warning in task.route_decision["warnings"])
+    calls = orchestrator.task_store.list_model_calls(task.id)
+    assert len(calls) == 1
+    assert calls[0].operation == "route_task"
+    assert calls[0].runtime == "codex_cli"
+    assert calls[0].status == "failed"
+
+
 def test_full_mvp_lifecycle(tmp_path):
     orchestrator = Orchestrator(make_settings(tmp_path))
 

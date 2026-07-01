@@ -2,10 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { listArtifacts, readArtifactById } from "../api/client";
 import type { ArtifactContentResponse, TaskArtifact } from "../api/types";
-import { formatDate } from "../i18n";
+import { artifactKindLabel, formatDate } from "../i18n";
 import { ArtifactViewer } from "./ArtifactViewer";
 
 interface TaskArtifactsProps {
+  advancedUi: boolean;
   setError: (message: string | null) => void;
   taskId: string;
 }
@@ -33,7 +34,7 @@ const KIND_ORDER = [
   "events",
 ];
 
-export function TaskArtifacts({ setError, taskId }: TaskArtifactsProps) {
+export function TaskArtifacts({ advancedUi, setError, taskId }: TaskArtifactsProps) {
   const [artifacts, setArtifacts] = useState<TaskArtifact[]>([]);
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
   const [content, setContent] = useState<ArtifactContentResponse | null>(null);
@@ -57,7 +58,7 @@ export function TaskArtifacts({ setError, taskId }: TaskArtifactsProps) {
       setSelectedArtifactId((current) => current || response.items[0]?.id || null);
       setError(null);
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Не удалось загрузить артефакты");
+      setError(error instanceof Error ? error.message : "Не удалось загрузить артефакты.");
     } finally {
       setLoading(false);
     }
@@ -72,7 +73,7 @@ export function TaskArtifacts({ setError, taskId }: TaskArtifactsProps) {
       setContent(await readArtifactById(taskId, selectedArtifactId));
       setError(null);
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Не удалось загрузить артефакт");
+      setError(error instanceof Error ? error.message : "Артефакт пока не создан или недоступен.");
     }
   }, [selectedArtifactId, setError, taskId]);
 
@@ -95,11 +96,14 @@ export function TaskArtifacts({ setError, taskId }: TaskArtifactsProps) {
       <div className="artifact-list panel">
         <div className="section-title">
           <h2>Артефакты</h2>
-          <button className="icon-button" type="button" onClick={() => void loadArtifacts()} title="Обновить артефакты">
+          <button className="icon-button" type="button" onClick={() => void loadArtifacts()} title="Обновить артефакты" aria-label="Обновить артефакты">
             <RefreshCw size={16} />
           </button>
         </div>
         {loading ? <div className="empty">Загружаю артефакты...</div> : null}
+        {!loading && sortedArtifacts.length === 0 ? (
+          <div className="empty">Артефакты появятся после того, как Tasker начнет выполнение.</div>
+        ) : null}
         {sortedArtifacts.map((artifact) => (
           <button
             className={artifact.id === selectedArtifactId ? "artifact-item artifact-item--selected" : "artifact-item"}
@@ -107,17 +111,17 @@ export function TaskArtifacts({ setError, taskId }: TaskArtifactsProps) {
             type="button"
             onClick={() => setSelectedArtifactId(artifact.id)}
           >
-            <strong>{artifact.title}</strong>
+            <strong>{artifact.title || artifactKindLabel(artifact.kind)}</strong>
             <span>
-              {artifact.kind}
+              {artifactKindLabel(artifact.kind)}
               {artifact.version ? ` v${artifact.version}` : ""}
             </span>
-            <small>{artifact.relative_path}</small>
+            {advancedUi ? <small>{artifact.relative_path}</small> : null}
             <small>{formatDate(artifact.updated_at)}</small>
           </button>
         ))}
       </div>
-      <ArtifactViewer content={content} onRefresh={() => void loadContent()} />
+      <ArtifactViewer advancedUi={advancedUi} content={content} onRefresh={() => void loadContent()} />
     </section>
   );
 }

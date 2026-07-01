@@ -3,15 +3,16 @@ import ReactMarkdown from "react-markdown";
 import type { ArtifactContentResponse } from "../api/types";
 
 interface ArtifactViewerProps {
+  advancedUi: boolean;
   content: ArtifactContentResponse | null;
   onRefresh: () => void;
 }
 
-export function ArtifactViewer({ content, onRefresh }: ArtifactViewerProps) {
+export function ArtifactViewer({ advancedUi, content, onRefresh }: ArtifactViewerProps) {
   if (!content) {
     return (
       <section className="artifact-viewer panel">
-        <div className="empty">Выберите артефакт.</div>
+        <div className="empty">Артефакт пока не создан или недоступен.</div>
       </section>
     );
   }
@@ -24,17 +25,19 @@ export function ArtifactViewer({ content, onRefresh }: ArtifactViewerProps) {
       <div className="artifact-viewer__header">
         <div>
           <h2>{content.artifact.title}</h2>
-          <span>{content.artifact.relative_path}</span>
+          {advancedUi ? <span>{content.artifact.relative_path}</span> : null}
         </div>
         <div className="button-row">
           <button type="button" onClick={() => void navigator.clipboard.writeText(content.content)}>
             <Copy size={16} />
             Скопировать
           </button>
-          <button type="button" onClick={() => void navigator.clipboard.writeText(content.artifact.relative_path)}>
-            <Copy size={16} />
-            Путь
-          </button>
+          {advancedUi ? (
+            <button type="button" onClick={() => void navigator.clipboard.writeText(content.artifact.relative_path)}>
+              <Copy size={16} />
+              Путь
+            </button>
+          ) : null}
           <button type="button" onClick={onRefresh}>
             <RefreshCw size={16} />
             Обновить
